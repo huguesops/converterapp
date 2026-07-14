@@ -32,7 +32,7 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "openrouter/free"
+DEFAULT_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
