@@ -32,7 +32,7 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "openai/gpt-4o-mini"
+DEFAULT_MODEL = "nvidia/nemotron-3.5-content-safety:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
@@ -52,6 +52,7 @@ VISION_MODELS = {
     "deepseek/deepseek-chat",
     "poolside/laguna-xs-2.1:free",
     "meta-llama/llama-3.2-90b-vision",
+    "nvidia/nemotron-3.5-content-safety:free",
 }
 
 
