@@ -1,7 +1,7 @@
 """
-extractor_openrouter.py - Version 1.0
+extractor_openrouter.py - Version 2.0
 Extraction des relevés bancaires via OpenRouter API
-Support multi-modèles : GPT-4o, Claude 3.5 Sonnet, Gemini 2.0 Flash, DeepSeek V3
+Correction : ouverture, clôture, toutes les lignes sans saut
 """
 
 import base64
@@ -32,16 +32,7 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-# Exemples de modèles disponibles :
-#   "openai/gpt-4o"                    → OpenAI (payant)
-#   "openai/gpt-4o-mini"               → OpenAI mini (peu coûteux)
-#   "anthropic/claude-3.5-sonnet"      → Claude (payant)
-#   "google/gemini-2.0-flash-exp:free" → Gemini gratuit
-#   "deepseek/deepseek-chat"           → DeepSeek (peu coûteux)
-#   "poolside/laguna-xs-2.1:free"      → Poolside gratuit
-#   "meta-llama/llama-3.2-90b-vision"  → Llama gratuit
-# ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "tencent/hy3:free"
+DEFAULT_MODEL = "openai/gpt-4o-mini"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
@@ -61,7 +52,6 @@ VISION_MODELS = {
     "deepseek/deepseek-chat",
     "poolside/laguna-xs-2.1:free",
     "meta-llama/llama-3.2-90b-vision",
-    "tencent/hy3:free",
 }
 
 
@@ -153,18 +143,6 @@ class OpenRouterExtractor:
         progress_callback: Optional[Callable] = None,
         verbose_debug: bool = True,
     ):
-        """
-        Args:
-            api_key: Clé API OpenRouter
-            mode: "vision" ou "hybrid"
-            banque_nom: Nom de la banque pour les instructions spécifiques
-            model: Modèle OpenRouter à utiliser (ex: "openai/gpt-4o").
-                   Si None, utilise DEFAULT_MODEL défini dans la config.
-            fallback_models: Liste de modèles de fallback en cas d'échec.
-                           Si None, utilise DEFAULT_FALLBACK_MODELS.
-            progress_callback: Fonction de callback pour la progression
-            verbose_debug: Activer les logs détaillés
-        """
         self.api_key = api_key
         self.mode = mode
         self.banque_nom = banque_nom
@@ -180,7 +158,6 @@ class OpenRouterExtractor:
             self.progress_callback(step, msg)
 
     def _get_model_display_name(self, model_id: str) -> str:
-        """Retourne le nom d'affichage pour un model_id OpenRouter."""
         return model_id
 
     # ----------------------------------------------------------------
@@ -188,9 +165,6 @@ class OpenRouterExtractor:
     # ----------------------------------------------------------------
 
     def _call_openrouter_vision(self, image_base64: str, prompt: str, page_num: int) -> Optional[str]:
-        """
-        Appelle OpenRouter en mode vision avec une image encodée en base64.
-        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -242,10 +216,7 @@ class OpenRouterExtractor:
                 return content
             else:
                 error_detail = response.text[:500]
-                self.logger.error(
-                    f"Erreur API {response.status_code}",
-                    f"Détail: {error_detail}",
-                )
+                self.logger.error(f"Erreur API {response.status_code}", f"Détail: {error_detail}")
                 return None
 
         except requests.exceptions.Timeout:
@@ -256,9 +227,6 @@ class OpenRouterExtractor:
             return None
 
     def _call_openrouter_text(self, text_content: str, prompt: str, page_num: int) -> Optional[str]:
-        """
-        Appelle OpenRouter en mode texte.
-        """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -292,10 +260,7 @@ class OpenRouterExtractor:
                 data = response.json()
                 return data.get("choices", [{}])[0].get("message", {}).get("content", "")
             else:
-                self.logger.error(
-                    f"Erreur API {response.status_code}",
-                    f"Détail: {response.text[:500]}",
-                )
+                self.logger.error(f"Erreur API {response.status_code}", f"Détail: {response.text[:500]}")
                 return None
 
         except Exception as e:
@@ -303,9 +268,6 @@ class OpenRouterExtractor:
             return None
 
     def _try_fallback(self, page_image=None, page_text=None, prompt: str = "", page_num: int = 1) -> Optional[str]:
-        """
-        Essaie les modèles de fallback si le modèle principal échoue.
-        """
         all_models = [self.model] + (self.fallback_models or [])
         tried_models = set()
 
@@ -316,7 +278,6 @@ class OpenRouterExtractor:
 
             self._current_model = model_id
             model_display = self._get_model_display_name(model_id)
-
             self.logger.warning(f"Fallback vers {model_display}")
 
             is_vision = model_id in VISION_MODELS
@@ -333,15 +294,15 @@ class OpenRouterExtractor:
                 self.logger.success(f"Fallback réussi avec {model_display}")
                 return result
 
-        self._current_model = self.model  # Restaure le modèle initial
+        self._current_model = self.model
         return None
 
     # ----------------------------------------------------------------
-    # CONSTRUCTION DU PROMPT
+    # CONSTRUCTION DU PROMPT — VERSION TRÈS STRICTE
     # ----------------------------------------------------------------
 
     def _build_prompt(self, is_vision: bool = True) -> str:
-        """Construit le prompt adapté à la banque sélectionnée."""
+        """Construit un prompt très strict pour capturer TOUTES les lignes."""
         c = self.config
 
         json_example = '''
@@ -361,30 +322,26 @@ class OpenRouterExtractor:
 '''
         prompt = f"""Tu es un expert comptable très rigoureux spécialisé dans les relevés bancaires camerounais.
 
-**MISSION CRITIQUE** : Extraire **TOUTES** les lignes de transaction visibles, **sans en sauter aucune**.
+**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles sur l'image, y compris :
+- La ligne d'ouverture (Opening Balance / Solde d'ouverture)
+- Chaque ligne de transaction individuelle  
+- La ligne de clôture (Closing Balance / Solde de clôture)
 
 **Structure du relevé {c.nom}** :
 {c.structure_description}
 
-**Colonnes à extraire** :
-1. Date (JJ/MM/AAAA)
-2. Référence / N° de chèque
-3. Libellé / Description de l'opération (peut être sur plusieurs lignes)
-4. Date Valeur (si présente)
-5. Débit (montant sortant)
-6. Crédit (montant entrant)
-7. Solde (balance après opération)
-
 **Instructions spécifiques pour {c.nom}** :
 {c.specific_instructions}
 
-**RÈGLES NON NÉGOCIABLES** :
-1. Liste chaque ligne de transaction une par une, du haut vers le bas
-2. Ne JAMAIS sauter une ligne qui contient un montant
-3. Si une description est sur plusieurs lignes, tu dois la fusionner en une seule
-4. Montants : retourne uniquement des chiffres sans séparateur (ex: 308000 au lieu de 308,000)
-5. Solde : inclus toujours le solde après chaque opération si présent
-6. Retourne **uniquement** le JSON suivant, sans aucun commentaire :
+**RÈGLES STRICTES** :
+1. La première ligne (Opening Balance / Solde d'ouverture) DOIT être extraite avec son solde
+2. La dernière ligne (Closing Balance / Solde de clôture) DOIT être extraite avec son solde
+3. Entre les deux, liste **CHAQUE** ligne une par une, du haut vers le bas
+4. Ne JAMAIS sauter une ligne qui contient un montant en Débit, Crédit ou Solde
+5. Si une description est sur plusieurs lignes, tu dois la fusionner COMPLÈTEMENT en une seule
+6. Montants : retourne uniquement des chiffres sans séparateur (ex: 308000 au lieu de 308,000)
+7. Le solde d'ouverture : mets le montant dans "credit" (c'est un solde créditeur) ou "debit" (si débiteur)
+8. Retourne **uniquement** le JSON suivant, sans aucun commentaire :
 
 {json_example}
 """
@@ -395,7 +352,6 @@ class OpenRouterExtractor:
     # ----------------------------------------------------------------
 
     def extract(self, pdf_bytes: bytes) -> pd.DataFrame:
-        """Point d'entrée principal pour l'extraction."""
         self.logger.step(f"Début extraction {self.banque_nom} - Mode {self.mode}")
 
         if self.mode == "hybrid":
@@ -403,7 +359,6 @@ class OpenRouterExtractor:
         return self._extract_vision(pdf_bytes)
 
     def _extract_vision(self, pdf_bytes: bytes) -> pd.DataFrame:
-        """Extraction via Vision API (analyse d'images)."""
         if not PDF2IMAGE_AVAILABLE:
             self.logger.error("pdf2image non disponible")
             return self._empty_df()
@@ -422,7 +377,7 @@ class OpenRouterExtractor:
         for idx, image in enumerate(images, 1):
             self._update_progress(
                 15 + int(70 * idx / len(images)),
-                f"Analyse page {idx}/{len(images)} avec {self._get_model_display_name(self.model)}",
+                f"Analyse page {idx}/{len(images)}",
             )
             transactions = self._process_page_vision(image, idx, prompt)
             all_transactions.extend(transactions)
@@ -430,16 +385,17 @@ class OpenRouterExtractor:
         return self._build_dataframe(all_transactions)
 
     def _process_page_vision(self, image: Image.Image, page_num: int, prompt: str) -> List[Dict]:
-        """Traite une page en mode vision avec fallback."""
         optimized = self._optimize_image(image)
         img_base64 = self._image_to_base64(optimized)
 
-        # Essai modèle principal
+        # Essai modèle principal avec retry
         for attempt in range(1, 4):
             self.logger.debug(f"Tentative {attempt}/3 - Page {page_num}")
             raw = self._call_openrouter_vision(img_base64, prompt, page_num)
             if raw and len(raw) > 50:
-                return self._parse_response(raw, f"page {page_num}")
+                parsed = self._parse_response(raw, f"page {page_num}")
+                if parsed:
+                    return parsed
             time.sleep(2)
 
         # Fallback
@@ -455,10 +411,8 @@ class OpenRouterExtractor:
         return []
 
     def _extract_hybrid(self, pdf_bytes: bytes) -> pd.DataFrame:
-        """Mode hybride : essaie d'abord l'extraction texte, puis vision si nécessaire."""
         self.logger.step("Mode hybride activé")
 
-        # Tentative extraction texte via pdfplumber
         try:
             import pdfplumber
             import io
@@ -478,14 +432,9 @@ class OpenRouterExtractor:
         return self._extract_vision(pdf_bytes)
 
     def _extract_text(self, text_content: str) -> pd.DataFrame:
-        """Extraction via analyse de texte."""
         prompt = self._build_prompt(is_vision=False)
-        prompt += "\n\n**Format texte extrait du PDF :**\n"
-        prompt += text_content
-
         self.logger.step("Analyse du texte par l'IA")
 
-        # Diviser en chunks si trop long
         max_chars = 30000
         chunks = [text_content[i:i+max_chars] for i in range(0, len(text_content), max_chars)]
 
@@ -496,7 +445,7 @@ class OpenRouterExtractor:
 
             raw = None
             for attempt in range(1, 4):
-                raw = self._call_openrouter_text(chunk, self._build_prompt(is_vision=False) + f"\n\n**Texte (partie {i+1}/{len(chunks)}) :**\n", i+1)
+                raw = self._call_openrouter_text(chunk, prompt_chunk, i+1)
                 if raw and len(raw) > 50:
                     break
                 time.sleep(2)
@@ -515,17 +464,14 @@ class OpenRouterExtractor:
     # ----------------------------------------------------------------
 
     def _optimize_image(self, image: Image.Image) -> Image.Image:
-        """Optimise l'image pour l'analyse IA."""
         if image.mode != "RGB":
             image = image.convert("RGB")
-        # Redimensionner si trop large (max 2000px)
         if image.width > 2000:
             ratio = 2000 / image.width
             image = image.resize((2000, int(image.height * ratio)), Image.LANCZOS)
         return image
 
     def _image_to_base64(self, image: Image.Image) -> str:
-        """Convertit une image PIL en base64."""
         buffered = BytesIO()
         image.save(buffered, format="PNG", optimize=True)
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -535,41 +481,39 @@ class OpenRouterExtractor:
     # ----------------------------------------------------------------
 
     def _parse_response(self, raw: str, context: str) -> List[Dict]:
-        """Parse la réponse JSON de l'IA."""
         if not raw:
             return []
 
-        # Nettoyer le markdown JSON
         text = re.sub(r"```(?:json)?\s*|\s*```", "", raw, flags=re.IGNORECASE).strip()
 
-        # Essayer d'extraire un objet JSON valide
+        # Essai 1 : JSON direct
         try:
             data = json.loads(text)
             transactions = data.get("transactions", [])
-            if not isinstance(transactions, list):
-                self.logger.warning(f"Format inattendu ({context}) : transactions n'est pas une liste")
-                return []
-            parsed = [self._normalize(t) for t in transactions if self._normalize(t)]
-            self.logger.success(f"{len(parsed)} transactions extraites ({context})")
-            return parsed
+            if isinstance(transactions, list):
+                parsed = [self._normalize(t) for t in transactions if self._normalize(t)]
+                self.logger.success(f"{len(parsed)} transactions extraites ({context})")
+                return parsed
         except json.JSONDecodeError:
-            # Tentative de récupération : chercher un bloc JSON dans le texte
-            json_match = re.search(r'\{[\s\S]*"transactions"[\s\S]*\}', text)
-            if json_match:
-                try:
-                    data = json.loads(json_match.group(0))
-                    transactions = data.get("transactions", [])
+            pass
+
+        # Essai 2 : chercher un bloc JSON dans le texte
+        json_match = re.search(r'\{[\s\S]*"transactions"[\s\S]*\}', text)
+        if json_match:
+            try:
+                data = json.loads(json_match.group(0))
+                transactions = data.get("transactions", [])
+                if isinstance(transactions, list):
                     parsed = [self._normalize(t) for t in transactions if self._normalize(t)]
                     self.logger.success(f"{len(parsed)} transactions extraites après correction ({context})")
                     return parsed
-                except json.JSONDecodeError:
-                    pass
+            except json.JSONDecodeError:
+                pass
 
-            self.logger.error(f"Échec parsing JSON ({context})", f"Réponse: {raw[:300]}")
-            return []
+        self.logger.error(f"Échec parsing JSON ({context})", f"Réponse: {raw[:300]}")
+        return []
 
     def _normalize(self, t: Dict) -> Optional[Dict]:
-        """Normalise une transaction."""
         if not isinstance(t, dict):
             return None
 
@@ -577,22 +521,40 @@ class OpenRouterExtractor:
         if not libelle or libelle.lower() in ("none", "null", ""):
             return None
 
+        # Traitement spécial : "Opening Balance" ou "Solde d'ouverture"
+        # → le montant du solde doit être mis dans 'credit' ou 'debit'
+        debit = self._fmt_amount(t.get("debit") or t.get("débit"))
+        credit = self._fmt_amount(t.get("credit") or t.get("crédit"))
+        solde = self._fmt_amount(t.get("solde"))
+
+        libelle_lower = libelle.lower()
+        is_balance = any(kw in libelle_lower for kw in ["ouverture", "opening", "clôture", "cloture", "closing", "balance final"])
+
+        # Si c'est une ligne de solde avec un solde mais sans débit/crédit
+        if is_balance and solde is not None and debit is None and credit is None:
+            if solde >= 0:
+                credit = solde
+            else:
+                debit = abs(solde)
+
         return {
             "date": str(t.get("date", "")).strip()[:10],
             "reference": str(t.get("reference", "") or t.get("référence", "") or "").strip(),
             "libelle": libelle,
             "date_valeur": str(t.get("date_valeur", "") or t.get("date_valeur", "") or "").strip()[:10],
-            "debit": self._fmt_amount(t.get("debit") or t.get("débit")),
-            "credit": self._fmt_amount(t.get("credit") or t.get("crédit")),
-            "solde": self._fmt_amount(t.get("solde")),
+            "debit": debit,
+            "credit": credit,
+            "solde": solde,
         }
 
     def _fmt_amount(self, val) -> Optional[float]:
-        """Formate un montant (format camerounais avec virgules)."""
-        if val is None or str(val).lower() in ("null", "none", "", "0"):
+        """Convertit un montant en float. '0' est un montant valide, pas None."""
+        if val is None:
+            return None
+        s = str(val).strip()
+        if s.lower() in ("null", "none", ""):
             return None
         try:
-            s = str(val).strip()
             s = re.sub(r"[^\d.,-]", "", s)
             s = s.replace(",", ".")
             if s.count(".") > 1:
@@ -606,7 +568,6 @@ class OpenRouterExtractor:
     # ----------------------------------------------------------------
 
     def _build_dataframe(self, transactions: List[Dict]) -> pd.DataFrame:
-        """Construit le DataFrame final."""
         if not transactions:
             self.logger.warning("Aucune transaction extraite")
             return self._empty_df()
