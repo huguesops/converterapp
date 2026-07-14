@@ -41,7 +41,7 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 #   "poolside/laguna-xs-2.1:free"      → Poolside gratuit
 #   "meta-llama/llama-3.2-90b-vision"  → Llama gratuit
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "poolside/laguna-xs-2.1:free"
+DEFAULT_MODEL = "tencent/hy3:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
@@ -61,6 +61,7 @@ VISION_MODELS = {
     "deepseek/deepseek-chat",
     "poolside/laguna-xs-2.1:free",
     "meta-llama/llama-3.2-90b-vision",
+    "tencent/hy3:free",
 }
 
 
