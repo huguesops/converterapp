@@ -49,14 +49,16 @@ class DataCleaner:
         if val is None or pd.isna(val):
             return None
         s = str(val).strip()
-        if s.lower() in ('null', 'none', '', '0'):
+        if s.lower() in ('null', 'none', ''):
             return None
+        # Ne pas convertir "0" en None (le solde peut être 0)
         try:
             s = re.sub(r'[^\d.,-]', '', s)
             s = s.replace(',', '.')
             if s.count('.') > 1:
                 s = s.replace('.', '')
-            return float(s) if s else None
+            f = float(s) if s else None
+            return f  # Retourner 0.0 si le montant est 0 (ne pas transformer en None)
         except:
             return None
 
