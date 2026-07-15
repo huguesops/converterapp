@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "poolside/laguna-xs-2.1:free"
+DEFAULT_MODEL = "stepfun/step-3.7-flash"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "poolside/laguna-xs-2.1:free",
+    "stepfun/step-3.7-flash",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "poolside/laguna-xs-2.1:free",
+    "stepfun/step-3.7-flash",
 }
 # ====================== DEBUG LOGGER ======================
 
