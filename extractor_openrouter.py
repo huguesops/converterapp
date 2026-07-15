@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
+DEFAULT_MODEL = "qwen/qwen3.6-plus"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "deepseek/deepseek-v4-flash",
+    "qwen/qwen3.6-plus",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "deepseek/deepseek-v4-flash",
+    "qwen/qwen3.6-plus",
 }
 # ====================== DEBUG LOGGER ======================
 
