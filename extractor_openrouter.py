@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "z-ai/glm-4.7"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "z-ai/glm-4.7",
+    "openai/gpt-oss-120b",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "z-ai/glm-4.7",
+    "openai/gpt-oss-120b",
 }
 # ====================== DEBUG LOGGER ======================
 
