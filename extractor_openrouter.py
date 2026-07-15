@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "openai/gpt-5.2-chat"
+DEFAULT_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "openai/gpt-5.2-chat",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "openai/gpt-5.2-chat",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
 }
 # ====================== DEBUG LOGGER ======================
 
