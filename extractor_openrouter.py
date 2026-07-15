@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "openai/gpt-oss-120b"
+DEFAULT_MODEL = "xiaomi/mimo-v2.5"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "openai/gpt-oss-120b",
+    "xiaomi/mimo-v2.5",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "openai/gpt-oss-120b",
+    "xiaomi/mimo-v2.5",
 }
 # ====================== DEBUG LOGGER ======================
 
