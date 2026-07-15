@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"
+DEFAULT_MODEL = "poolside/laguna-xs-2.1:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "poolside/laguna-xs-2.1:free",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "poolside/laguna-xs-2.1:free",
 }
 # ====================== DEBUG LOGGER ======================
 
