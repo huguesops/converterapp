@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "stepfun/step-3.7-flash"
+DEFAULT_MODEL = "qwen/qwen3.7-plus"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "stepfun/step-3.7-flash",
+    "qwen/qwen3.7-plus",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "stepfun/step-3.7-flash",
+    "qwen/qwen3.7-plus",
 }
 # ====================== DEBUG LOGGER ======================
 
