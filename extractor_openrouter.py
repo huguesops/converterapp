@@ -32,7 +32,7 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "qwen/qwen3.7-plus"
+DEFAULT_MODEL = "openai/gpt-4o-mini"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
