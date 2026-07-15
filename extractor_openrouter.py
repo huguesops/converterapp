@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "openrouter/auto"
+DEFAULT_MODEL = "tencent/hy3:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "openrouter/auto",
+    "tencent/hy3:free",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "openrouter/auto",
+    "tencent/hy3:free",
 }
 # ====================== DEBUG LOGGER ======================
 
