@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "nvidia/llama-nemotron-rerank-vl-1b-v2:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "nvidia/llama-nemotron-rerank-vl-1b-v2:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
 }
 # ====================== DEBUG LOGGER ======================
 
