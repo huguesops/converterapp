@@ -32,16 +32,16 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "nousresearch/hermes-3-llama-3.1-405b:free"
+DEFAULT_MODEL = "openrouter/auto"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "openrouter/auto",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "openrouter/auto",
 }
 # ====================== DEBUG LOGGER ======================
 
