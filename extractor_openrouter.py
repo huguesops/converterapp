@@ -36,26 +36,13 @@ DEFAULT_MODEL = "qwen/qwen3-next-80b-a3b-instruct:free"
 
 # Modèles de fallback en cas d'échec du modèle principal
 DEFAULT_FALLBACK_MODELS = [
-    "openai/gpt-4o-mini",
-    "anthropic/claude-3.5-sonnet",
-    "google/gemini-2.5-flash-preview-04-17",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "openai/gpt-4o",
-    "openai/gpt-4o-mini",
-    "anthropic/claude-3.5-sonnet",
-    "anthropic/claude-3-opus",
-    "google/gemini-2.0-flash-exp:free",
-    "google/gemini-2.5-flash-preview-04-17",
-    "deepseek/deepseek-chat",
-    "poolside/laguna-xs-2.1:free",
-    "meta-llama/llama-3.2-90b-vision",
-    "nvidia/nemotron-3.5-content-safety:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
 }
-
-
 # ====================== DEBUG LOGGER ======================
 
 class DebugLogger:
