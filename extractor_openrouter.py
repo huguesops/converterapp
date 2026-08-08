@@ -32,22 +32,25 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-DEFAULT_MODEL = "openai/gpt-4o-mini"
+# Choix délibéré d'un modèle plus cher mais nettement plus fiable sur les
+# tableaux financiers denses : l'app est utilisée par les équipes de
+# rapprochement bancaire, où une ligne ratée ou un solde mal lu coûte plus
+# cher (en temps de vérification manuelle) que la différence de coût API.
+DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 
-# Modèles de fallback en cas d'échec du modèle principal
-# IMPORTANT : doivent être DIFFÉRENTS du modèle principal, sinon le
-# fallback ne fait rien (un modèle déjà tenté est ignoré).
-# Vérifiez les slugs disponibles/actifs sur https://openrouter.ai/models
+# Modèles de fallback : deux fournisseurs différents, tous deux haut de
+# gamme, pour ne pas retomber sur un modèle faible en cas d'échec du
+# modèle principal. Vérifiez les slugs actifs sur https://openrouter.ai/models
 DEFAULT_FALLBACK_MODELS = [
-    "google/gemini-2.5-flash",
-    "anthropic/claude-3-haiku",
+    "google/gemini-2.5-pro",
+    "openai/gpt-4o",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
-    "openai/gpt-4o-mini",
-    "google/gemini-2.5-flash",
-    "anthropic/claude-3-haiku",
+    "anthropic/claude-sonnet-4.6",
+    "google/gemini-2.5-pro",
+    "openai/gpt-4o",
 }
 # ====================== DEBUG LOGGER ======================
 
@@ -146,6 +149,17 @@ class OpenRouterExtractor:
         self.progress_callback = progress_callback
         self.logger = DebugLogger(verbose=verbose_debug)
         self._current_model = self.model
+        # Pages pour lesquelles TOUTES les tentatives (modèle principal +
+        # fallback) ont échoué : à distinguer d'une page qui contient
+        # légitimement 0 transaction. Permet à l'appelant (app.py) de
+        # savoir précisément quelles pages n'ont pas pu être lues, au lieu
+        # que l'échec passe inaperçu (page silencieusement vide).
+        self.failed_pages: List[int] = []
+        # Dernier solde connu (dernière transaction parsée avec succès),
+        # utilisé comme indice de continuité pour la page suivante — et
+        # exposé publiquement pour que l'appelant (app.py) puisse le faire
+        # persister d'un lot à l'autre entre deux reruns Streamlit.
+        self.last_balance_hint: Optional[float] = None
 
     def _update_progress(self, step: int, msg: str):
         if self.progress_callback:
@@ -183,7 +197,7 @@ class OpenRouterExtractor:
                     ],
                 }
             ],
-            "max_tokens": 8192,
+            "max_tokens": 16000,
             "temperature": 0.0,
             "top_p": 1.0,
         }
@@ -196,7 +210,7 @@ class OpenRouterExtractor:
                 f"{OPENROUTER_API_BASE}/chat/completions",
                 headers=headers,
                 json=payload,
-                timeout=120,
+                timeout=180,
             )
 
             if response.status_code == 200:
@@ -220,7 +234,7 @@ class OpenRouterExtractor:
                 return None
 
         except requests.exceptions.Timeout:
-            self.logger.error("Timeout API OpenRouter (120s)")
+            self.logger.error("Timeout API OpenRouter (180s)")
             return None
         except Exception as e:
             self.logger.error("Exception appel API", exc=e)
@@ -240,7 +254,7 @@ class OpenRouterExtractor:
                 {"role": "system", "content": "Tu es un expert comptable spécialisé dans les relevés bancaires camerounais."},
                 {"role": "user", "content": f"{prompt}\n\nTexte à analyser:\n{text_content}"},
             ],
-            "max_tokens": 8192,
+            "max_tokens": 16000,
             "temperature": 0.0,
             "top_p": 1.0,
         }
@@ -301,7 +315,7 @@ class OpenRouterExtractor:
     # CONSTRUCTION DU PROMPT — VERSION TRÈS STRICTE
     # ----------------------------------------------------------------
 
-    def _build_prompt(self, is_vision: bool = True) -> str:
+    def _build_prompt(self, is_vision: bool = True, previous_balance: Optional[float] = None) -> str:
         """Construit un prompt très strict pour capturer TOUTES les lignes."""
         c = self.config
 
@@ -320,6 +334,23 @@ class OpenRouterExtractor:
   ]
 }
 '''
+        continuity_hint = ""
+        if previous_balance is not None:
+            continuity_hint = f"""
+**POINT DE CONTRÔLE (continuité avec la page précédente)** :
+Le solde de la dernière transaction lue sur la page précédente était de
+{previous_balance:,.2f} FCFA. Pour CHAQUE ligne de cette page, vérifie que :
+solde de la ligne = solde de la ligne précédente + crédit − débit
+(le premier solde de cette page doit découler de {previous_balance:,.2f} FCFA,
+sauf si cette page commence par une nouvelle période avec sa propre ligne
+d'ouverture). Si un chiffre est difficile à lire, utilise cette règle de
+continuité pour lever l'ambiguïté plutôt que de deviner. Ne saute AUCUNE
+ligne même si son écriture est petite, tamponnée, ou partiellement
+recouverte par un cachet — dans ce cas, fais de ton mieux pour déduire les
+valeurs manquantes à partir du contexte (solde avant/après) plutôt que
+d'omettre la ligne.
+"""
+
         prompt = f"""Tu es un expert comptable très rigoureux spécialisé dans les relevés bancaires camerounais.
 
 **MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles sur l'image, y compris :
@@ -332,7 +363,7 @@ class OpenRouterExtractor:
 
 **Instructions spécifiques pour {c.nom}** :
 {c.specific_instructions}
-
+{continuity_hint}
 **RÈGLES STRICTES** :
 1. La première ligne (Opening Balance / Solde d'ouverture) DOIT être extraite avec son solde
 2. La dernière ligne (Closing Balance / Solde de clôture) DOIT être extraite avec son solde
@@ -379,7 +410,10 @@ class OpenRouterExtractor:
         # cette méthode pour compatibilité mais elle renvoie toujours 250.
         return 250
 
-    def extract_transactions(self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int) -> List[Dict]:
+    def extract_transactions(
+        self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int,
+        starting_balance: Optional[float] = None,
+    ) -> List[Dict]:
         """Extrait les transactions brutes (liste de dicts) pour la plage de pages
         [first_page, last_page] (incluses, 1-indexé), sans construire le DataFrame.
 
@@ -388,14 +422,20 @@ class OpenRouterExtractor:
         images de SON lot (libérées à la fin), et les transactions déjà extraites
         sur les lots précédents peuvent être accumulées côté appelant même si un
         lot suivant échoue.
+
+        `starting_balance` : solde de la dernière transaction connue AVANT ce
+        lot (généralement le dernier solde du lot précédent) — sert d'indice
+        de continuité au modèle sur la première page du lot. Après l'appel,
+        `self.last_balance_hint` contient le dernier solde lu, à repasser au
+        lot suivant pour préserver la continuité sur tout le document.
         """
         if not PDF2IMAGE_AVAILABLE:
             self.logger.error("pdf2image non disponible")
             return []
 
-        prompt = self._build_prompt(is_vision=True)
         all_transactions = []
         dpi = self._dpi_for(total_pages)
+        current_balance = starting_balance
 
         for idx in range(first_page, last_page + 1):
             self._update_progress(
@@ -409,16 +449,77 @@ class OpenRouterExtractor:
                 )
                 if not page_images:
                     self.logger.error(f"Conversion vide pour la page {idx}")
+                    self.failed_pages.append(idx)
                     continue
                 image = page_images[0]
             except Exception as e:
                 self.logger.error(f"Échec conversion page {idx}", exc=e)
+                self.failed_pages.append(idx)
                 continue
 
+            prompt = self._build_prompt(is_vision=True, previous_balance=current_balance)
             transactions = self._process_page_vision(image, idx, total_pages, prompt)
             all_transactions.extend(transactions)
+            if transactions:
+                last_solde = transactions[-1].get("solde")
+                if isinstance(last_solde, (int, float)):
+                    current_balance = last_solde
             del image, page_images
 
+        self.last_balance_hint = current_balance
+        return all_transactions
+
+    def extract_specific_pages(
+        self, pdf_bytes: bytes, pages: List[int], total_pages: int,
+        starting_balance: Optional[float] = None,
+    ) -> List[Dict]:
+        """Comme extract_transactions, mais pour une liste explicite (non
+        contiguë) de numéros de page — utilisé pour relancer uniquement les
+        pages qui ont échoué lors d'un premier passage, sans retraiter tout
+        le document.
+
+        `starting_balance` : solde connu juste avant la première page de la
+        liste (typiquement le dernier solde lu avant l'échec), utilisé comme
+        indice de continuité — voir extract_transactions.
+        """
+        if not PDF2IMAGE_AVAILABLE:
+            self.logger.error("pdf2image non disponible")
+            return []
+
+        all_transactions = []
+        dpi = self._dpi_for(total_pages)
+        current_balance = starting_balance
+
+        for idx in pages:
+            self._update_progress(
+                int(100 * idx / max(total_pages, 1)),
+                f"Nouvel essai — page {idx}/{total_pages}",
+            )
+            try:
+                page_images = convert_from_bytes(
+                    pdf_bytes, dpi=dpi, fmt="PNG",
+                    first_page=idx, last_page=idx,
+                )
+                if not page_images:
+                    self.logger.error(f"Conversion vide pour la page {idx}")
+                    self.failed_pages.append(idx)
+                    continue
+                image = page_images[0]
+            except Exception as e:
+                self.logger.error(f"Échec conversion page {idx}", exc=e)
+                self.failed_pages.append(idx)
+                continue
+
+            prompt = self._build_prompt(is_vision=True, previous_balance=current_balance)
+            transactions = self._process_page_vision(image, idx, total_pages, prompt)
+            all_transactions.extend(transactions)
+            if transactions:
+                last_solde = transactions[-1].get("solde")
+                if isinstance(last_solde, (int, float)):
+                    current_balance = last_solde
+            del image, page_images
+
+        self.last_balance_hint = current_balance
         return all_transactions
 
     def extract_page_range(self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int) -> pd.DataFrame:
@@ -483,6 +584,7 @@ class OpenRouterExtractor:
             return self._parse_response(raw, f"page {page_num} (fallback)")
 
         self.logger.warning(f"Page {page_num} ignorée après échec de toutes les tentatives")
+        self.failed_pages.append(page_num)
         return []
 
     def _extract_hybrid(self, pdf_bytes: bytes) -> pd.DataFrame:
@@ -539,11 +641,15 @@ class OpenRouterExtractor:
     # ----------------------------------------------------------------
 
     def _optimize_image(self, image: Image.Image) -> Image.Image:
+        # Seuil relevé (2400px, contre 2000 avant) : à dpi=250 une page A4
+        # fait ~2070px de large, donc l'ancien seuil de 2000 la redimensionnait
+        # systématiquement vers le bas et annulait une partie du gain du DPI.
+        # Avec un modèle plus capable, on préserve davantage de détail.
         if image.mode != "RGB":
             image = image.convert("RGB")
-        if image.width > 2000:
-            ratio = 2000 / image.width
-            image = image.resize((2000, int(image.height * ratio)), Image.LANCZOS)
+        if image.width > 2400:
+            ratio = 2400 / image.width
+            image = image.resize((2400, int(image.height * ratio)), Image.LANCZOS)
         return image
 
     def _image_to_base64(self, image: Image.Image) -> str:
