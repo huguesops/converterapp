@@ -358,40 +358,52 @@ class OpenRouterExtractor:
             return self._extract_hybrid(pdf_bytes)
         return self._extract_vision(pdf_bytes)
 
-    def _extract_vision(self, pdf_bytes: bytes) -> pd.DataFrame:
-        if not PDF2IMAGE_AVAILABLE:
-            self.logger.error("pdf2image non disponible")
-            return self._empty_df()
-
-        self._update_progress(10, "Analyse du PDF...")
+    def get_total_pages(self, pdf_bytes: bytes) -> int:
+        """Nombre de pages du PDF, sans rien rasteriser (opération légère)."""
         try:
             from pdf2image.pdf2image import pdfinfo_from_bytes
             info = pdfinfo_from_bytes(pdf_bytes)
-            total_pages = int(info.get("Pages", 0))
-            self.logger.success(f"{total_pages} page(s) détectée(s)")
+            return int(info.get("Pages", 0))
         except Exception as e:
             self.logger.error("Échec lecture info PDF", exc=e)
-            return self._empty_df()
+            return 0
 
-        if total_pages <= 0:
-            self.logger.error("Aucune page détectée dans le PDF")
-            return self._empty_df()
+    def _dpi_for(self, total_pages: int) -> int:
+        # Résolution réduite pour les gros documents : limite la mémoire
+        # et la taille des requêtes envoyées à l'API, avec un impact
+        # visuel minime pour de l'OCR de relevé bancaire.
+        if total_pages > 40:
+            return 180
+        if total_pages > 20:
+            return 220
+        return 250
+
+    def extract_transactions(self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int) -> List[Dict]:
+        """Extrait les transactions brutes (liste de dicts) pour la plage de pages
+        [first_page, last_page] (incluses, 1-indexé), sans construire le DataFrame.
+
+        Permet à l'appelant (app.py) de découper un gros PDF en lots traités sur
+        des reruns Streamlit séparés : chaque appel ne garde en mémoire que les
+        images de SON lot (libérées à la fin), et les transactions déjà extraites
+        sur les lots précédents peuvent être accumulées côté appelant même si un
+        lot suivant échoue.
+        """
+        if not PDF2IMAGE_AVAILABLE:
+            self.logger.error("pdf2image non disponible")
+            return []
 
         prompt = self._build_prompt(is_vision=True)
         all_transactions = []
+        dpi = self._dpi_for(total_pages)
 
-        # IMPORTANT : on convertit UNE page à la fois (au lieu de charger
-        # tout le PDF en images d'un coup) pour éviter les pics mémoire
-        # qui font planter/redémarrer l'app sur les PDF de nombreuses pages
-        # (ex : dépassement mémoire sur Streamlit Community Cloud).
-        for idx in range(1, total_pages + 1):
+        for idx in range(first_page, last_page + 1):
             self._update_progress(
-                15 + int(70 * idx / total_pages),
+                int(100 * idx / max(total_pages, 1)),
                 f"Analyse page {idx}/{total_pages}",
             )
             try:
                 page_images = convert_from_bytes(
-                    pdf_bytes, dpi=250, fmt="PNG",
+                    pdf_bytes, dpi=dpi, fmt="PNG",
                     first_page=idx, last_page=idx,
                 )
                 if not page_images:
@@ -404,11 +416,35 @@ class OpenRouterExtractor:
 
             transactions = self._process_page_vision(image, idx, total_pages, prompt)
             all_transactions.extend(transactions)
-
-            # libère explicitement la mémoire de l'image avant la page suivante
             del image, page_images
 
-        return self._build_dataframe(all_transactions)
+        return all_transactions
+
+    def extract_page_range(self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int) -> pd.DataFrame:
+        """Comme extract_transactions, mais renvoie directement un DataFrame.
+        Pratique pour un traitement en un seul passage (petits documents)."""
+        return self.build_dataframe(
+            self.extract_transactions(pdf_bytes, first_page, last_page, total_pages)
+        )
+
+    def build_dataframe(self, transactions: List[Dict]) -> pd.DataFrame:
+        """Alias public de _build_dataframe : construit le DataFrame final à
+        partir de transactions accumulées sur un ou plusieurs lots."""
+        return self._build_dataframe(transactions)
+
+    def _extract_vision(self, pdf_bytes: bytes) -> pd.DataFrame:
+        if not PDF2IMAGE_AVAILABLE:
+            self.logger.error("pdf2image non disponible")
+            return self._empty_df()
+
+        self._update_progress(10, "Analyse du PDF...")
+        total_pages = self.get_total_pages(pdf_bytes)
+        if total_pages <= 0:
+            self.logger.error("Aucune page détectée dans le PDF")
+            return self._empty_df()
+        self.logger.success(f"{total_pages} page(s) détectée(s)")
+
+        return self.extract_page_range(pdf_bytes, 1, total_pages, total_pages)
 
     def _process_page_vision(self, image: Image.Image, page_num: int, total_pages: int, prompt: str) -> List[Dict]:
         optimized = self._optimize_image(image)
