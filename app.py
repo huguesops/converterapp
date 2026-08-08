@@ -162,6 +162,7 @@ if st.session_state.extraction_in_progress:
                     df_raw = extractor.extract(st.session_state.pdf_bytes_cache)
                 cleaner = DataCleaner()
                 df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
+                df_clean = cleaner.check_consistency(df_clean)
                 st.session_state.df_clean = df_clean
                 st.session_state.stats = cleaner.get_statistics(df_clean)
                 st.session_state.extraction_done = True
@@ -195,6 +196,7 @@ if st.session_state.extraction_in_progress:
                     df_raw = extractor.build_dataframe(st.session_state.collected_transactions)
                     cleaner = DataCleaner()
                     df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
+                    df_clean = cleaner.check_consistency(df_clean)
                     st.session_state.df_clean = df_clean
                     st.session_state.stats = cleaner.get_statistics(df_clean)
                     st.session_state.extraction_done = True
@@ -214,9 +216,44 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     df_display['Date'] = pd.to_datetime(df_display['Date'], dayfirst=True, errors='coerce')
     df_display = df_display.dropna(subset=['Date'])
 
-    # Métriques - Cartes personnalisées visibles
-    stats = st.session_state.stats
-    
+    # --- FILTRE PAR DATE ---
+    # Permet de zoomer sur une période précise pour vérifier la cohérence
+    # (comparer visuellement au PDF) sans dérouler tout le relevé.
+    st.subheader("🔎 Filtrer par période")
+    date_min = df_display['Date'].min().date()
+    date_max = df_display['Date'].max().date()
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        date_debut = st.date_input("Du", value=date_min, min_value=date_min, max_value=date_max)
+    with col_d2:
+        date_fin = st.date_input("Au", value=date_max, min_value=date_min, max_value=date_max)
+
+    if date_debut > date_fin:
+        st.warning("⚠️ La date de début est postérieure à la date de fin.")
+    else:
+        df_display = df_display[
+            (df_display['Date'].dt.date >= date_debut) & (df_display['Date'].dt.date <= date_fin)
+        ]
+
+    # Recalcule les statistiques sur la période filtrée uniquement
+    cleaner_for_stats = DataCleaner()
+    stats = cleaner_for_stats.get_statistics(df_display)
+
+    # --- CONTRÔLE DE COHÉRENCE ---
+    if 'Écart' in df_display.columns:
+        anomalies = df_display[df_display['Écart'].notna() & (df_display['Écart'].abs() > 1)]
+        if len(anomalies) > 0:
+            st.warning(
+                f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde "
+                f"incohérent avec la ligne précédente (montant probablement mal lu, ou ligne "
+                f"manquante juste avant). Vérifiez-les contre le PDF original."
+            )
+            with st.expander("Voir les lignes en anomalie"):
+                st.dataframe(
+                    anomalies[[c for c in ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart'] if c in anomalies.columns]],
+                    use_container_width=True,
+                )
+
     def fmt(val):
         if val is None or val == 'N/A':
             return 'N/A'
@@ -319,8 +356,8 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     st.divider()
     st.subheader("📋 Données extraites")
 
-    # Afficher toutes les colonnes : Date, Référence, Libellé, Débit, Crédit, Solde
-    display_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde']
+    # Afficher toutes les colonnes : Date, Référence, Libellé, Débit, Crédit, Solde, Écart
+    display_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart']
     display_df = df_display[[c for c in display_cols if c in df_display.columns]]
     st.dataframe(display_df, use_container_width=True, height=400)
 
