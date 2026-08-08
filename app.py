@@ -58,7 +58,18 @@ if "extraction_done" not in st.session_state:
         "stats": None,
         "banque_selectionnee": "UNICS",
         "pdf_bytes_cache": None,
+        "extraction_in_progress": False,
+        "total_pages": None,
+        "current_page": 1,
+        "collected_transactions": [],
+        "extraction_method": "vision",
     })
+
+# Nombre de pages traitées par lot avant de rendre la main à Streamlit
+# (st.rerun()). Limite la durée d'exécution ininterrompue du script et
+# la mémoire utilisée à un instant donné, quel que soit le nombre total
+# de pages du document — c'est ce qui évite le blocage sur les gros PDF.
+BATCH_SIZE = 8
 
 # ====================== SIDEBAR ======================
 with st.sidebar:
@@ -92,7 +103,12 @@ with st.sidebar:
 st.markdown('<div class="main-header"><h1>🏦 SKAB Bank Statement Extractor</h1><p>Génération de fichiers d\'importation pour la comptabilité Odoo</p></div>', unsafe_allow_html=True)
 
 # ====================== EXTRACTION ======================
-if uploaded_file and not st.session_state.extraction_done and not st.session_state.show_confirm:
+if (
+    uploaded_file
+    and not st.session_state.extraction_done
+    and not st.session_state.show_confirm
+    and not st.session_state.extraction_in_progress
+):
     if st.button("🔍 Analyser le relevé", type="primary", use_container_width=True):
         st.session_state.pdf_bytes_cache = uploaded_file.read()
         st.session_state.show_confirm = True
@@ -107,34 +123,88 @@ if st.session_state.show_confirm:
             st.info(f"**Analyse imminente** — Banque: **{st.session_state.banque_selectionnee}**")
         with col2:
             if st.button("✅ Confirmer l'analyse", type="primary", use_container_width=True):
-                with st.spinner("Extraction en cours..."):
-                    try:
-                        progress_bar = st.progress(0, text="Initialisation...")
+                # On fige la méthode choisie pour toute la durée de
+                # l'extraction (le radio bouton reste modifiable dans la
+                # sidebar mais ne doit pas changer le comportement en
+                # cours de traitement d'un lot déjà commencé).
+                st.session_state.extraction_method = method
+                st.session_state.extraction_in_progress = True
+                st.session_state.show_confirm = False
+                st.session_state.total_pages = None
+                st.session_state.current_page = 1
+                st.session_state.collected_transactions = []
+                st.rerun()
 
-                        def progress_callback(step, msg):
-                            progress_bar.progress(min(step, 100), text=msg)
+# ====================== EXTRACTION PAR LOTS ======================
+# Le traitement est découpé en lots de BATCH_SIZE pages. Chaque exécution
+# du script ne traite qu'un lot, puis appelle st.rerun() : ça borne le
+# temps d'exécution ininterrompue et la mémoire utilisée quel que soit le
+# nombre total de pages, et ça donne une vraie progression visible (au
+# lieu d'un unique appel bloquant de plusieurs dizaines de minutes sur
+# les gros documents, qui pouvait dépasser une limite de la plateforme).
+if st.session_state.extraction_in_progress:
+    if not get_openrouter_key():
+        st.error("❌ Clé API OpenRouter manquante. Configurez-la dans les secrets Streamlit.")
+        st.session_state.extraction_in_progress = False
+    else:
+        try:
+            extractor = OpenRouterExtractor(
+                api_key=get_openrouter_key(),
+                mode=st.session_state.extraction_method,
+                banque_nom=st.session_state.banque_selectionnee,
+                verbose_debug=False,
+            )
 
-                        extractor = OpenRouterExtractor(
-                            api_key=get_openrouter_key(),
-                            mode=method,
-                            banque_nom=st.session_state.banque_selectionnee,
-                            progress_callback=progress_callback,
-                            verbose_debug=False,
-                        )
+            if st.session_state.extraction_method != "vision":
+                # Mode hybride : texte d'abord (léger), un seul passage.
+                # Ne bascule sur l'image que si le PDF est scanné.
+                with st.spinner("Extraction en cours (mode hybride)..."):
+                    df_raw = extractor.extract(st.session_state.pdf_bytes_cache)
+                cleaner = DataCleaner()
+                df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
+                st.session_state.df_clean = df_clean
+                st.session_state.stats = cleaner.get_statistics(df_clean)
+                st.session_state.extraction_done = True
+                st.session_state.extraction_in_progress = False
+                st.rerun()
+            else:
+                if st.session_state.total_pages is None:
+                    st.session_state.total_pages = extractor.get_total_pages(st.session_state.pdf_bytes_cache)
+                    if not st.session_state.total_pages:
+                        st.error("❌ Impossible de lire le PDF (nombre de pages introuvable).")
+                        st.session_state.extraction_in_progress = False
+                        st.stop()
+                    st.rerun()
 
-                        df_raw = extractor.extract(st.session_state.pdf_bytes_cache)
+                total_pages = st.session_state.total_pages
+                current = st.session_state.current_page
+                batch_end = min(current + BATCH_SIZE - 1, total_pages)
 
-                        cleaner = DataCleaner()
-                        df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
+                st.progress(
+                    (current - 1) / total_pages,
+                    text=f"🔍 Analyse en cours — pages {current} à {batch_end} sur {total_pages}...",
+                )
 
-                        st.session_state.df_clean = df_clean
-                        st.session_state.stats = cleaner.get_statistics(df_clean)
-                        st.session_state.extraction_done = True
-                        st.session_state.show_confirm = False
-                        st.rerun()
+                batch_transactions = extractor.extract_transactions(
+                    st.session_state.pdf_bytes_cache, current, batch_end, total_pages
+                )
+                st.session_state.collected_transactions.extend(batch_transactions)
+                st.session_state.current_page = batch_end + 1
 
-                    except Exception as e:
-                        st.error(f"❌ Erreur lors de l'extraction : {str(e)}")
+                if st.session_state.current_page > total_pages:
+                    df_raw = extractor.build_dataframe(st.session_state.collected_transactions)
+                    cleaner = DataCleaner()
+                    df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
+                    st.session_state.df_clean = df_clean
+                    st.session_state.stats = cleaner.get_statistics(df_clean)
+                    st.session_state.extraction_done = True
+                    st.session_state.extraction_in_progress = False
+
+                st.rerun()
+
+        except Exception as e:
+            st.error(f"❌ Erreur lors de l'extraction : {str(e)}")
+            st.session_state.extraction_in_progress = False
 
 # ====================== RÉSULTATS ======================
 if st.session_state.extraction_done and st.session_state.df_clean is not None:
