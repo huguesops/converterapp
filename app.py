@@ -63,6 +63,9 @@ if "extraction_done" not in st.session_state:
         "current_page": 1,
         "collected_transactions": [],
         "extraction_method": "vision",
+        "failed_pages": [],
+        "retry_failed_pages": False,
+        "last_known_balance": None,
     })
 
 # Nombre de pages traitées par lot avant de rendre la main à Streamlit
@@ -133,6 +136,8 @@ if st.session_state.show_confirm:
                 st.session_state.total_pages = None
                 st.session_state.current_page = 1
                 st.session_state.collected_transactions = []
+                st.session_state.failed_pages = []
+                st.session_state.last_known_balance = None
                 st.rerun()
 
 # ====================== EXTRACTION PAR LOTS ======================
@@ -160,6 +165,7 @@ if st.session_state.extraction_in_progress:
                 # Ne bascule sur l'image que si le PDF est scanné.
                 with st.spinner("Extraction en cours (mode hybride)..."):
                     df_raw = extractor.extract(st.session_state.pdf_bytes_cache)
+                st.session_state.failed_pages = sorted(set(extractor.failed_pages))
                 cleaner = DataCleaner()
                 df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
                 df_clean = cleaner.check_consistency(df_clean)
@@ -187,9 +193,21 @@ if st.session_state.extraction_in_progress:
                 )
 
                 batch_transactions = extractor.extract_transactions(
-                    st.session_state.pdf_bytes_cache, current, batch_end, total_pages
+                    st.session_state.pdf_bytes_cache, current, batch_end, total_pages,
+                    starting_balance=st.session_state.last_known_balance,
                 )
                 st.session_state.collected_transactions.extend(batch_transactions)
+                # Le solde de la dernière transaction lue sur ce lot sert
+                # d'indice de continuité pour le lot suivant (aide le modèle
+                # à s'auto-vérifier sur la première page du prochain lot).
+                st.session_state.last_known_balance = extractor.last_balance_hint
+                # On mémorise toute page qui a échoué (conversion ou API,
+                # après épuisement des tentatives + fallback) pour pouvoir
+                # le signaler à l'utilisateur et proposer un nouvel essai
+                # ciblé, plutôt que de laisser l'échec passer inaperçu.
+                st.session_state.failed_pages = sorted(
+                    set(st.session_state.failed_pages) | set(extractor.failed_pages)
+                )
                 st.session_state.current_page = batch_end + 1
 
                 if st.session_state.current_page > total_pages:
@@ -208,6 +226,46 @@ if st.session_state.extraction_in_progress:
             st.error(f"❌ Erreur lors de l'extraction : {str(e)}")
             st.session_state.extraction_in_progress = False
 
+# ====================== NOUVEL ESSAI SUR PAGES EN ÉCHEC ======================
+# Relance uniquement les pages qui ont échoué (voir failed_pages), sans
+# retraiter tout le document. Uniquement pour le mode vision : c'est là
+# que le suivi par page a un sens (le mode hybride ne travaille pas par
+# page unique).
+if st.session_state.retry_failed_pages:
+    if not get_openrouter_key():
+        st.error("❌ Clé API OpenRouter manquante.")
+        st.session_state.retry_failed_pages = False
+    else:
+        try:
+            extractor = OpenRouterExtractor(
+                api_key=get_openrouter_key(),
+                mode="vision",
+                banque_nom=st.session_state.banque_selectionnee,
+                verbose_debug=False,
+            )
+            pages_a_reessayer = list(st.session_state.failed_pages)
+            hint = st.session_state.collected_transactions[-1].get("solde") if st.session_state.collected_transactions else None
+            with st.spinner(f"Nouvel essai sur {len(pages_a_reessayer)} page(s)..."):
+                new_transactions = extractor.extract_specific_pages(
+                    st.session_state.pdf_bytes_cache, pages_a_reessayer, st.session_state.total_pages,
+                    starting_balance=hint,
+                )
+            st.session_state.collected_transactions.extend(new_transactions)
+            # Ne restent en échec que les pages toujours ratées après ce nouvel essai
+            st.session_state.failed_pages = sorted(set(extractor.failed_pages))
+
+            df_raw = extractor.build_dataframe(st.session_state.collected_transactions)
+            cleaner = DataCleaner()
+            df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
+            df_clean = cleaner.check_consistency(df_clean)
+            st.session_state.df_clean = df_clean
+            st.session_state.stats = cleaner.get_statistics(df_clean)
+            st.session_state.retry_failed_pages = False
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Erreur lors du nouvel essai : {str(e)}")
+            st.session_state.retry_failed_pages = False
+
 # ====================== RÉSULTATS ======================
 if st.session_state.extraction_done and st.session_state.df_clean is not None:
     df_display = st.session_state.df_clean.copy()
@@ -215,6 +273,21 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     # Nettoyage dates
     df_display['Date'] = pd.to_datetime(df_display['Date'], dayfirst=True, errors='coerce')
     df_display = df_display.dropna(subset=['Date'])
+
+    # --- PAGES EN ÉCHEC ---
+    if st.session_state.failed_pages:
+        pages_str = ", ".join(str(p) for p in st.session_state.failed_pages)
+        col_warn, col_btn = st.columns([4, 1])
+        with col_warn:
+            st.error(
+                f"⚠️ {len(st.session_state.failed_pages)} page(s) n'ont pas pu être lues "
+                f"après plusieurs tentatives et ne sont PAS incluses ci-dessous : page(s) {pages_str}. "
+                f"Ce sont les transactions manquantes les plus probables."
+            )
+        with col_btn:
+            if st.session_state.extraction_method == "vision" and st.button("🔄 Relancer ces pages", use_container_width=True):
+                st.session_state.retry_failed_pages = True
+                st.rerun()
 
     # --- FILTRE PAR DATE ---
     # Permet de zoomer sur une période précise pour vérifier la cohérence
