@@ -165,6 +165,49 @@ class DataCleaner:
 
         return df
 
+    def check_consistency(self, df: pd.DataFrame, tolerance: float = 1.0) -> pd.DataFrame:
+        """Ajoute une colonne 'Écart' : différence entre le solde extrait de
+        chaque ligne et le solde attendu (solde de la ligne précédente +
+        crédit - débit de la ligne courante).
+
+        Un écart proche de 0 = ligne cohérente. Un écart important signale
+        une anomalie locale : montant tronqué/mal lu, ligne manquante juste
+        avant, ou ligne dans le mauvais ordre — c'est le point d'entrée pour
+        détecter les erreurs d'extraction sans devoir tout recomparer au PDF
+        à la main.
+
+        NB : ce contrôle est local (il repart du solde extrait de la ligne
+        précédente, pas d'un solde recalculé en cascade) pour qu'une seule
+        ligne fausse ne fasse pas apparaître TOUT ce qui suit comme faux.
+        Une rupture de période (ouverture d'un nouveau mois) est normale et
+        n'est pas comptée comme anomalie.
+        """
+        if df.empty or 'Solde' not in df.columns:
+            df['Écart'] = None
+            return df
+
+        df = df.reset_index(drop=True)
+        lib_lower = df.get('Libellé', pd.Series('', index=df.index)).astype(str).str.lower()
+        is_opening = lib_lower.str.contains('ouverture|opening', na=False)
+
+        ecarts = [None] * len(df)
+        for i in range(1, len(df)):
+            if is_opening.iloc[i]:
+                continue  # nouvelle période : pas de continuité avec la ligne précédente
+            prev_solde = df.at[i - 1, 'Solde']
+            credit = df.at[i, 'Crédit']
+            debit = df.at[i, 'Débit']
+            credit = 0 if pd.isna(credit) else credit
+            debit = 0 if pd.isna(debit) else debit
+            solde = df.at[i, 'Solde']
+            if pd.isna(prev_solde) or pd.isna(solde):
+                continue
+            attendu = prev_solde + credit - debit
+            ecarts[i] = round(solde - attendu, 2)
+
+        df['Écart'] = ecarts
+        return df
+
     def get_statistics(self, df: pd.DataFrame) -> dict:
         stats = {
             'total_transactions': 0,
