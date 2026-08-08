@@ -35,13 +35,19 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 
 # Modèles de fallback en cas d'échec du modèle principal
+# IMPORTANT : doivent être DIFFÉRENTS du modèle principal, sinon le
+# fallback ne fait rien (un modèle déjà tenté est ignoré).
+# Vérifiez les slugs disponibles/actifs sur https://openrouter.ai/models
 DEFAULT_FALLBACK_MODELS = [
-    "openai/gpt-4o-mini",
+    "google/gemini-2.5-flash",
+    "anthropic/claude-3-haiku",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
     "openai/gpt-4o-mini",
+    "google/gemini-2.5-flash",
+    "anthropic/claude-3-haiku",
 }
 # ====================== DEBUG LOGGER ======================
 
@@ -202,6 +208,12 @@ class OpenRouterExtractor:
                         f"Tokens: {usage.get('prompt_tokens', '?')} prompt / {usage.get('completion_tokens', '?')} completion"
                     )
                 return content
+            elif response.status_code == 429:
+                retry_after = response.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else 5.0
+                self.logger.warning(f"Rate limit (429) - Page {page_num}, attente {wait}s")
+                time.sleep(min(wait, 15.0))
+                return None
             else:
                 error_detail = response.text[:500]
                 self.logger.error(f"Erreur API {response.status_code}", f"Détail: {error_detail}")
@@ -351,34 +363,67 @@ class OpenRouterExtractor:
             self.logger.error("pdf2image non disponible")
             return self._empty_df()
 
-        self._update_progress(10, "Conversion PDF en images...")
+        self._update_progress(10, "Analyse du PDF...")
         try:
-            images = convert_from_bytes(pdf_bytes, dpi=250, fmt="PNG")
-            self.logger.success(f"{len(images)} image(s) générée(s)")
+            from pdf2image.pdf2image import pdfinfo_from_bytes
+            info = pdfinfo_from_bytes(pdf_bytes)
+            total_pages = int(info.get("Pages", 0))
+            self.logger.success(f"{total_pages} page(s) détectée(s)")
         except Exception as e:
-            self.logger.error("Échec conversion PDF", exc=e)
+            self.logger.error("Échec lecture info PDF", exc=e)
+            return self._empty_df()
+
+        if total_pages <= 0:
+            self.logger.error("Aucune page détectée dans le PDF")
             return self._empty_df()
 
         prompt = self._build_prompt(is_vision=True)
         all_transactions = []
 
-        for idx, image in enumerate(images, 1):
+        # IMPORTANT : on convertit UNE page à la fois (au lieu de charger
+        # tout le PDF en images d'un coup) pour éviter les pics mémoire
+        # qui font planter/redémarrer l'app sur les PDF de nombreuses pages
+        # (ex : dépassement mémoire sur Streamlit Community Cloud).
+        for idx in range(1, total_pages + 1):
             self._update_progress(
-                15 + int(70 * idx / len(images)),
-                f"Analyse page {idx}/{len(images)}",
+                15 + int(70 * idx / total_pages),
+                f"Analyse page {idx}/{total_pages}",
             )
-            transactions = self._process_page_vision(image, idx, prompt)
+            try:
+                page_images = convert_from_bytes(
+                    pdf_bytes, dpi=250, fmt="PNG",
+                    first_page=idx, last_page=idx,
+                )
+                if not page_images:
+                    self.logger.error(f"Conversion vide pour la page {idx}")
+                    continue
+                image = page_images[0]
+            except Exception as e:
+                self.logger.error(f"Échec conversion page {idx}", exc=e)
+                continue
+
+            transactions = self._process_page_vision(image, idx, total_pages, prompt)
             all_transactions.extend(transactions)
+
+            # libère explicitement la mémoire de l'image avant la page suivante
+            del image, page_images
 
         return self._build_dataframe(all_transactions)
 
-    def _process_page_vision(self, image: Image.Image, page_num: int, prompt: str) -> List[Dict]:
+    def _process_page_vision(self, image: Image.Image, page_num: int, total_pages: int, prompt: str) -> List[Dict]:
         optimized = self._optimize_image(image)
         img_base64 = self._image_to_base64(optimized)
 
         # Essai modèle principal avec retry
         for attempt in range(1, 4):
             self.logger.debug(f"Tentative {attempt}/3 - Page {page_num}")
+            # heartbeat : garde la connexion Streamlit vivante même si
+            # une page nécessite plusieurs tentatives (évite les coupures
+            # de websocket dues à un silence prolongé)
+            self._update_progress(
+                15 + int(70 * page_num / total_pages),
+                f"Analyse page {page_num}/{total_pages} (tentative {attempt}/3)",
+            )
             raw = self._call_openrouter_vision(img_base64, prompt, page_num)
             if raw and len(raw) > 50:
                 parsed = self._parse_response(raw, f"page {page_num}")
@@ -386,8 +431,12 @@ class OpenRouterExtractor:
                     return parsed
             time.sleep(2)
 
-        # Fallback
+        # Fallback vers un modèle réellement différent
         self.logger.warning(f"Échec modèle principal page {page_num}, tentative fallback...")
+        self._update_progress(
+            15 + int(70 * page_num / total_pages),
+            f"Analyse page {page_num}/{total_pages} (fallback)",
+        )
         raw = self._try_fallback(
             page_image=img_base64,
             prompt=prompt,
@@ -396,6 +445,7 @@ class OpenRouterExtractor:
         if raw:
             return self._parse_response(raw, f"page {page_num} (fallback)")
 
+        self.logger.warning(f"Page {page_num} ignorée après échec de toutes les tentatives")
         return []
 
     def _extract_hybrid(self, pdf_bytes: bytes) -> pd.DataFrame:
