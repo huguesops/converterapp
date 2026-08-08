@@ -369,13 +369,14 @@ class OpenRouterExtractor:
             return 0
 
     def _dpi_for(self, total_pages: int) -> int:
-        # Résolution réduite pour les gros documents : limite la mémoire
-        # et la taille des requêtes envoyées à l'API, avec un impact
-        # visuel minime pour de l'OCR de relevé bancaire.
-        if total_pages > 40:
-            return 180
-        if total_pages > 20:
-            return 220
+        # NOTE : on utilise volontairement une résolution FIXE et élevée,
+        # quel que soit le nombre de pages. Une version antérieure réduisait
+        # le DPI pour les gros documents (économie mémoire), mais depuis que
+        # extract_transactions() traite les pages par petits lots (voir
+        # app.py, BATCH_SIZE), la mémoire n'est plus le facteur limitant —
+        # et un DPI réduit dégradait fortement la lecture des tableaux
+        # financiers denses (montants tronqués, lignes ratées). On garde
+        # cette méthode pour compatibilité mais elle renvoie toujours 250.
         return 250
 
     def extract_transactions(self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int) -> List[Dict]:
