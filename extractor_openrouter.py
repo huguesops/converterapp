@@ -49,10 +49,10 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # NOTE : les modèles "preview" (Gemini) peuvent être renommés/retirés
 # sans préavis par leur fournisseur. Vérifiez les slugs actifs sur
 # https://openrouter.ai/models si les appels échouent en masse.
-DEFAULT_MODEL = "qwen/qwen3-vl-235b-a22b-instruct"
+DEFAULT_MODEL = "google/gemini-3-flash-preview"
 
 DEFAULT_FALLBACK_MODELS = [
-    "google/gemini-3-flash-preview",
+    "qwen/qwen3-vl-235b-a22b-instruct",
     "anthropic/claude-sonnet-4.6",
 ]
 
