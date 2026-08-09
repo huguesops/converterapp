@@ -5,6 +5,7 @@ Correction : ouverture, clôture, toutes les lignes sans saut
 """
 
 import base64
+import concurrent.futures
 import json
 import re
 import time
@@ -22,7 +23,7 @@ try:
 except ImportError:
     PDF2IMAGE_AVAILABLE = False
 
-from bank_configs import get_bank_config, BankConfig
+from bank_configs import get_bank_config, get_bank_list, BankConfig
 
 
 # ====================== CONFIGURATION OPENROUTER ======================
@@ -32,25 +33,34 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 # ═══════════════════════════════════════════════════════════════
 # Modèle IA par défaut (modifiable ici DIRECTEMENT dans le code)
 # ═══════════════════════════════════════════════════════════════
-# Choix délibéré d'un modèle plus cher mais nettement plus fiable sur les
-# tableaux financiers denses : l'app est utilisée par les équipes de
-# rapprochement bancaire, où une ligne ratée ou un solde mal lu coûte plus
-# cher (en temps de vérification manuelle) que la différence de coût API.
-DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
+# Qwen3-VL-235B-A22B-Instruct : excellent rapport coût/précision pour
+# l'OCR de documents (32 langues, benchmarks au niveau de Gemini 2.5 Pro
+# / GPT-5 sur les tâches multimodales) à un coût très bas
+# (~$0.20/$0.88 par M tokens). C'est le modèle principal.
+#
+# Fallback 1 : Gemini 3 Flash — toujours très bon en OCR, coût modéré,
+# fournisseur différent de Qwen (diversifie le risque de panne).
+#
+# Fallback 2 (urgence extrême uniquement) : Claude Sonnet 4.6 — le plus
+# cher (~15x Qwen), réservé aux pages qui ont déjà résisté aux deux
+# modèles précédents. Meilleure fiabilité disponible, mais son coût ne
+# se justifie que pour ce dernier recours.
+#
+# NOTE : les modèles "preview" (Gemini) peuvent être renommés/retirés
+# sans préavis par leur fournisseur. Vérifiez les slugs actifs sur
+# https://openrouter.ai/models si les appels échouent en masse.
+DEFAULT_MODEL = "qwen/qwen3-vl-235b-a22b-instruct"
 
-# Modèles de fallback : deux fournisseurs différents, tous deux haut de
-# gamme, pour ne pas retomber sur un modèle faible en cas d'échec du
-# modèle principal. Vérifiez les slugs actifs sur https://openrouter.ai/models
 DEFAULT_FALLBACK_MODELS = [
-    "google/gemini-2.5-pro",
-    "openai/gpt-4o",
+    "google/gemini-3-flash-preview",
+    "anthropic/claude-sonnet-4.6",
 ]
 
 # Modèles supportant la vision (analyse d'images)
 VISION_MODELS = {
+    "qwen/qwen3-vl-235b-a22b-instruct",
+    "google/gemini-3-flash-preview",
     "anthropic/claude-sonnet-4.6",
-    "google/gemini-2.5-pro",
-    "openai/gpt-4o",
 }
 # ====================== DEBUG LOGGER ======================
 
@@ -172,7 +182,13 @@ class OpenRouterExtractor:
     # APPELS API OPENROUTER
     # ----------------------------------------------------------------
 
-    def _call_openrouter_vision(self, image_base64: str, prompt: str, page_num: int) -> Optional[str]:
+    def _call_openrouter_vision(self, image_base64: str, prompt: str, page_num: int, model_id: Optional[str] = None) -> Optional[str]:
+        # IMPORTANT : model_id est un paramètre explicite (pas un attribut
+        # partagé sur self) car cette méthode est appelée depuis plusieurs
+        # threads en parallèle (voir extract_transactions) — un attribut
+        # partagé type self._current_model créerait une condition de course
+        # entre pages traitées simultanément avec des modèles différents.
+        model_id = model_id or self.model
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -181,7 +197,7 @@ class OpenRouterExtractor:
         }
 
         payload = {
-            "model": self._current_model,
+            "model": model_id,
             "messages": [
                 {
                     "role": "user",
@@ -202,7 +218,7 @@ class OpenRouterExtractor:
             "top_p": 1.0,
         }
 
-        model_display = self._get_model_display_name(self._current_model)
+        model_display = self._get_model_display_name(model_id)
         self.logger.api(f"Appel OpenRouter [{model_display}] - Page {page_num}")
 
         try:
@@ -240,7 +256,8 @@ class OpenRouterExtractor:
             self.logger.error("Exception appel API", exc=e)
             return None
 
-    def _call_openrouter_text(self, text_content: str, prompt: str, page_num: int) -> Optional[str]:
+    def _call_openrouter_text(self, text_content: str, prompt: str, page_num: int, model_id: Optional[str] = None) -> Optional[str]:
+        model_id = model_id or self.model
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -249,7 +266,7 @@ class OpenRouterExtractor:
         }
 
         payload = {
-            "model": self._current_model,
+            "model": model_id,
             "messages": [
                 {"role": "system", "content": "Tu es un expert comptable spécialisé dans les relevés bancaires camerounais."},
                 {"role": "user", "content": f"{prompt}\n\nTexte à analyser:\n{text_content}"},
@@ -259,7 +276,7 @@ class OpenRouterExtractor:
             "top_p": 1.0,
         }
 
-        model_display = self._get_model_display_name(self._current_model)
+        model_display = self._get_model_display_name(model_id)
         self.logger.api(f"Appel OpenRouter texte [{model_display}] - Page {page_num}")
 
         try:
@@ -290,16 +307,15 @@ class OpenRouterExtractor:
                 continue
             tried_models.add(model_id)
 
-            self._current_model = model_id
             model_display = self._get_model_display_name(model_id)
             self.logger.warning(f"Fallback vers {model_display}")
 
             is_vision = model_id in VISION_MODELS
 
             if is_vision and page_image:
-                result = self._call_openrouter_vision(page_image, prompt, page_num)
+                result = self._call_openrouter_vision(page_image, prompt, page_num, model_id=model_id)
             elif page_text:
-                result = self._call_openrouter_text(page_text, prompt, page_num)
+                result = self._call_openrouter_text(page_text, prompt, page_num, model_id=model_id)
             else:
                 self.logger.warning(f"Modèle {model_display} non applicable (pas d'image)")
                 continue
@@ -308,7 +324,6 @@ class OpenRouterExtractor:
                 self.logger.success(f"Fallback réussi avec {model_display}")
                 return result
 
-        self._current_model = self.model
         return None
 
     # ----------------------------------------------------------------
@@ -399,6 +414,64 @@ d'omettre la ligne.
             self.logger.error("Échec lecture info PDF", exc=e)
             return 0
 
+    def detect_bank(self, pdf_bytes: bytes) -> Optional[str]:
+        """Identifie automatiquement la banque à partir de la 1ère page du PDF
+        (logo/en-tête), en la faisant correspondre à la liste des banques
+        supportées (bank_configs.py). Un seul appel API, léger et rapide.
+
+        Retourne le nom exact de la banque (tel que dans BANK_CONFIGS) si
+        identifiée avec confiance, sinon None (l'appelant doit alors laisser
+        l'utilisateur choisir manuellement).
+        """
+        if not PDF2IMAGE_AVAILABLE:
+            return None
+
+        bank_list = get_bank_list()
+        try:
+            page_images = convert_from_bytes(pdf_bytes, dpi=150, fmt="PNG", first_page=1, last_page=1)
+            if not page_images:
+                return None
+            image = self._optimize_image(page_images[0])
+            img_base64 = self._image_to_base64(image)
+        except Exception as e:
+            self.logger.error("Échec conversion page 1 (détection banque)", exc=e)
+            return None
+
+        options_str = "\n".join(f"- {b}" for b in bank_list)
+        prompt = f"""Regarde le logo et l'en-tête de ce relevé bancaire camerounais.
+Identifie à quelle banque/institution il appartient, PARMI CETTE LISTE EXACTE :
+{options_str}
+
+Réponds UNIQUEMENT avec le nom exact d'une des options ci-dessus (copié tel
+quel), sans aucun autre texte. Si tu n'es pas sûr ou si aucune ne correspond
+clairement, réponds exactement : INCONNU"""
+
+        try:
+            raw = self._call_openrouter_vision(img_base64, prompt, page_num=1)
+        except Exception as e:
+            self.logger.error("Échec appel détection banque", exc=e)
+            return None
+
+        if not raw:
+            return None
+        raw = raw.strip()
+        if raw.upper() == "INCONNU":
+            return None
+
+        # Correspondance exacte d'abord, puis tolérante (au cas où le
+        # modèle ajoute un peu de texte malgré la consigne)
+        for b in bank_list:
+            if raw.strip().lower() == b.lower():
+                self.logger.success(f"Banque détectée automatiquement : {b}")
+                return b
+        for b in bank_list:
+            if b.lower() in raw.lower():
+                self.logger.success(f"Banque détectée automatiquement : {b}")
+                return b
+
+        self.logger.warning(f"Détection banque non concluante : réponse='{raw[:80]}'")
+        return None
+
     def _dpi_for(self, total_pages: int) -> int:
         # NOTE : on utilise volontairement une résolution FIXE et élevée,
         # quel que soit le nombre de pages. Une version antérieure réduisait
@@ -410,12 +483,89 @@ d'omettre la ligne.
         # cette méthode pour compatibilité mais elle renvoie toujours 250.
         return 250
 
+    # Nombre de pages traitées EN PARALLÈLE au sein d'un même lot/appel.
+    # Accélère nettement les gros documents (chaque appel API prend
+    # 5-30s) sans changer le coût total. Volontairement modéré pour
+    # rester sous les limites de débit (rate-limit) des fournisseurs.
+    MAX_PARALLEL_PAGES = 4
+
+    def _extract_pages_parallel(
+        self, pdf_bytes: bytes, pages: List[int], total_pages: int,
+        starting_balance: Optional[float], progress_label: str,
+    ) -> List[Dict]:
+        """Traite une liste de pages EN PARALLÈLE (jusqu'à MAX_PARALLEL_PAGES
+        appels API simultanés), tout en réassemblant les résultats dans
+        l'ORDRE des pages à la fin — pour que l'export final et l'indice
+        de continuité (last_balance_hint) restent corrects et déterministes,
+        peu importe l'ordre réel de complétion des requêtes.
+
+        Limite de l'indice de continuité en parallèle : toutes les pages
+        de CET appel reçoivent le même `starting_balance` (celui du début
+        du lot), plutôt qu'un chaînage page-à-page — impossible à garantir
+        sans traiter séquentiellement. C'est un compromis assumé : la
+        continuité reste exacte ENTRE deux lots/appels successifs, mais
+        approximative pour la 2e page d'un même lot et les suivantes.
+        """
+        if not PDF2IMAGE_AVAILABLE:
+            self.logger.error("pdf2image non disponible")
+            return []
+
+        dpi = self._dpi_for(total_pages)
+        results: Dict[int, List[Dict]] = {}
+
+        def process_one(idx: int) -> tuple:
+            self._update_progress(
+                int(100 * idx / max(total_pages, 1)),
+                f"{progress_label} page {idx}/{total_pages}",
+            )
+            try:
+                page_images = convert_from_bytes(
+                    pdf_bytes, dpi=dpi, fmt="PNG",
+                    first_page=idx, last_page=idx,
+                )
+                if not page_images:
+                    self.logger.error(f"Conversion vide pour la page {idx}")
+                    self.failed_pages.append(idx)
+                    return idx, []
+                image = page_images[0]
+            except Exception as e:
+                self.logger.error(f"Échec conversion page {idx}", exc=e)
+                self.failed_pages.append(idx)
+                return idx, []
+
+            prompt = self._build_prompt(is_vision=True, previous_balance=starting_balance)
+            transactions = self._process_page_vision(image, idx, total_pages, prompt)
+            del image, page_images
+            return idx, transactions
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.MAX_PARALLEL_PAGES) as executor:
+            futures = [executor.submit(process_one, idx) for idx in pages]
+            for future in concurrent.futures.as_completed(futures):
+                idx, transactions = future.result()
+                results[idx] = transactions
+
+        all_transactions: List[Dict] = []
+        current_balance = starting_balance
+        for idx in pages:  # ré-ordonnancement : ordre des pages, pas ordre de complétion
+            transactions = results.get(idx, [])
+            all_transactions.extend(transactions)
+            if transactions:
+                last_solde = transactions[-1].get("solde")
+                if isinstance(last_solde, (int, float)):
+                    current_balance = last_solde
+
+        self.last_balance_hint = current_balance
+        return all_transactions
+
     def extract_transactions(
         self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int,
         starting_balance: Optional[float] = None,
     ) -> List[Dict]:
         """Extrait les transactions brutes (liste de dicts) pour la plage de pages
         [first_page, last_page] (incluses, 1-indexé), sans construire le DataFrame.
+
+        Les pages du lot sont traitées EN PARALLÈLE (voir _extract_pages_parallel)
+        puis réassemblées dans l'ordre — accélère nettement les gros documents.
 
         Permet à l'appelant (app.py) de découper un gros PDF en lots traités sur
         des reruns Streamlit séparés : chaque appel ne garde en mémoire que les
@@ -425,49 +575,11 @@ d'omettre la ligne.
 
         `starting_balance` : solde de la dernière transaction connue AVANT ce
         lot (généralement le dernier solde du lot précédent) — sert d'indice
-        de continuité au modèle sur la première page du lot. Après l'appel,
-        `self.last_balance_hint` contient le dernier solde lu, à repasser au
-        lot suivant pour préserver la continuité sur tout le document.
+        de continuité au modèle. Après l'appel, `self.last_balance_hint`
+        contient le dernier solde lu, à repasser au lot suivant.
         """
-        if not PDF2IMAGE_AVAILABLE:
-            self.logger.error("pdf2image non disponible")
-            return []
-
-        all_transactions = []
-        dpi = self._dpi_for(total_pages)
-        current_balance = starting_balance
-
-        for idx in range(first_page, last_page + 1):
-            self._update_progress(
-                int(100 * idx / max(total_pages, 1)),
-                f"Analyse page {idx}/{total_pages}",
-            )
-            try:
-                page_images = convert_from_bytes(
-                    pdf_bytes, dpi=dpi, fmt="PNG",
-                    first_page=idx, last_page=idx,
-                )
-                if not page_images:
-                    self.logger.error(f"Conversion vide pour la page {idx}")
-                    self.failed_pages.append(idx)
-                    continue
-                image = page_images[0]
-            except Exception as e:
-                self.logger.error(f"Échec conversion page {idx}", exc=e)
-                self.failed_pages.append(idx)
-                continue
-
-            prompt = self._build_prompt(is_vision=True, previous_balance=current_balance)
-            transactions = self._process_page_vision(image, idx, total_pages, prompt)
-            all_transactions.extend(transactions)
-            if transactions:
-                last_solde = transactions[-1].get("solde")
-                if isinstance(last_solde, (int, float)):
-                    current_balance = last_solde
-            del image, page_images
-
-        self.last_balance_hint = current_balance
-        return all_transactions
+        pages = list(range(first_page, last_page + 1))
+        return self._extract_pages_parallel(pdf_bytes, pages, total_pages, starting_balance, "Analyse")
 
     def extract_specific_pages(
         self, pdf_bytes: bytes, pages: List[int], total_pages: int,
@@ -476,51 +588,13 @@ d'omettre la ligne.
         """Comme extract_transactions, mais pour une liste explicite (non
         contiguë) de numéros de page — utilisé pour relancer uniquement les
         pages qui ont échoué lors d'un premier passage, sans retraiter tout
-        le document.
+        le document. Traitement également parallélisé.
 
         `starting_balance` : solde connu juste avant la première page de la
         liste (typiquement le dernier solde lu avant l'échec), utilisé comme
         indice de continuité — voir extract_transactions.
         """
-        if not PDF2IMAGE_AVAILABLE:
-            self.logger.error("pdf2image non disponible")
-            return []
-
-        all_transactions = []
-        dpi = self._dpi_for(total_pages)
-        current_balance = starting_balance
-
-        for idx in pages:
-            self._update_progress(
-                int(100 * idx / max(total_pages, 1)),
-                f"Nouvel essai — page {idx}/{total_pages}",
-            )
-            try:
-                page_images = convert_from_bytes(
-                    pdf_bytes, dpi=dpi, fmt="PNG",
-                    first_page=idx, last_page=idx,
-                )
-                if not page_images:
-                    self.logger.error(f"Conversion vide pour la page {idx}")
-                    self.failed_pages.append(idx)
-                    continue
-                image = page_images[0]
-            except Exception as e:
-                self.logger.error(f"Échec conversion page {idx}", exc=e)
-                self.failed_pages.append(idx)
-                continue
-
-            prompt = self._build_prompt(is_vision=True, previous_balance=current_balance)
-            transactions = self._process_page_vision(image, idx, total_pages, prompt)
-            all_transactions.extend(transactions)
-            if transactions:
-                last_solde = transactions[-1].get("solde")
-                if isinstance(last_solde, (int, float)):
-                    current_balance = last_solde
-            del image, page_images
-
-        self.last_balance_hint = current_balance
-        return all_transactions
+        return self._extract_pages_parallel(pdf_bytes, pages, total_pages, starting_balance, "Nouvel essai —")
 
     def extract_page_range(self, pdf_bytes: bytes, first_page: int, last_page: int, total_pages: int) -> pd.DataFrame:
         """Comme extract_transactions, mais renvoie directement un DataFrame.
