@@ -81,10 +81,38 @@ with st.sidebar:
 
     uploaded_file = st.file_uploader("📄 Charger le relevé PDF", type=["pdf"])
 
-    banque_sel = st.selectbox("🏦 Banque émettrice", [
+    BANK_LIST = [
         "Financial House S.A", "BGFI Bank", "UNICS", "CEPAC", "ADVANS",
         "MUPECI", "SCB Cameroun", "BICEC", "UBA Cameroun", "Autre banque"
-    ], index=2)
+    ]
+    st.session_state.setdefault("banque_widget", "UNICS")
+
+    # --- DÉTECTION AUTOMATIQUE DE LA BANQUE ---
+    # Se déclenche une seule fois par fichier uploadé (via une signature
+    # nom+taille) : lit la 1ère page et pré-sélectionne la banque
+    # correspondante dans la liste ci-dessous, sans empêcher l'utilisateur
+    # de la corriger manuellement ensuite.
+    if uploaded_file is not None:
+        file_sig = f"{uploaded_file.name}:{uploaded_file.size}"
+        if st.session_state.get("bank_detect_sig") != file_sig:
+            st.session_state.bank_detect_sig = file_sig
+            if get_openrouter_key():
+                with st.spinner("🔍 Détection automatique de la banque..."):
+                    try:
+                        detector = OpenRouterExtractor(
+                            api_key=get_openrouter_key(), mode="vision",
+                            banque_nom="Autre banque", verbose_debug=False,
+                        )
+                        detected = detector.detect_bank(uploaded_file.getvalue())
+                    except Exception:
+                        detected = None
+                if detected:
+                    st.session_state.banque_widget = detected
+                    st.success(f"🏦 Banque détectée : **{detected}**")
+                else:
+                    st.info("Banque non détectée automatiquement — sélectionnez-la ci-dessous.")
+
+    banque_sel = st.selectbox("🏦 Banque émettrice", BANK_LIST, key="banque_widget")
     st.session_state.banque_selectionnee = banque_sel
 
     method = st.radio("🔍 Méthode d'analyse", ["vision", "hybrid"],
@@ -290,42 +318,10 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
                 st.rerun()
 
     # --- FILTRE PAR DATE ---
-    # Permet de zoomer sur une période précise pour vérifier la cohérence
-    # (comparer visuellement au PDF) sans dérouler tout le relevé.
-    st.subheader("🔎 Filtrer par période")
-    date_min = df_display['Date'].min().date()
-    date_max = df_display['Date'].max().date()
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        date_debut = st.date_input("Du", value=date_min, min_value=date_min, max_value=date_max)
-    with col_d2:
-        date_fin = st.date_input("Au", value=date_max, min_value=date_min, max_value=date_max)
-
-    if date_debut > date_fin:
-        st.warning("⚠️ La date de début est postérieure à la date de fin.")
-    else:
-        df_display = df_display[
-            (df_display['Date'].dt.date >= date_debut) & (df_display['Date'].dt.date <= date_fin)
-        ]
-
-    # Recalcule les statistiques sur la période filtrée uniquement
-    cleaner_for_stats = DataCleaner()
-    stats = cleaner_for_stats.get_statistics(df_display)
-
-    # --- CONTRÔLE DE COHÉRENCE ---
-    if 'Écart' in df_display.columns:
-        anomalies = df_display[df_display['Écart'].notna() & (df_display['Écart'].abs() > 1)]
-        if len(anomalies) > 0:
-            st.warning(
-                f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde "
-                f"incohérent avec la ligne précédente (montant probablement mal lu, ou ligne "
-                f"manquante juste avant). Vérifiez-les contre le PDF original."
-            )
-            with st.expander("Voir les lignes en anomalie"):
-                st.dataframe(
-                    anomalies[[c for c in ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart'] if c in anomalies.columns]],
-                    use_container_width=True,
-                )
+    # Déplacé plus bas, juste au-dessus du tableau "Données extraites" —
+    # voir section correspondante. Les indicateurs et le graphique
+    # ci-dessous portent sur l'ENSEMBLE du relevé.
+    stats = st.session_state.stats or {}
 
     def fmt(val):
         if val is None or val == 'N/A':
@@ -429,20 +425,70 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     st.divider()
     st.subheader("📋 Données extraites")
 
+    # --- FILTRE PAR DATE (au niveau des données extraites) ---
+    # Zoome sur une période précise pour vérifier la cohérence (comparer
+    # visuellement au PDF) sans dérouler tout le relevé. Streamlit ré-exécute
+    # le script à chaque changement de date : le résumé et le tableau
+    # ci-dessous se recalculent donc automatiquement, sans bouton "Appliquer".
+    date_min = df_display['Date'].min().date()
+    date_max = df_display['Date'].max().date()
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        date_debut = st.date_input("Du", value=date_min, min_value=date_min, max_value=date_max)
+    with col_d2:
+        date_fin = st.date_input("Au", value=date_max, min_value=date_min, max_value=date_max)
+
+    if date_debut > date_fin:
+        st.warning("⚠️ La date de début est postérieure à la date de fin.")
+        df_filtered = df_display.iloc[0:0]
+    else:
+        df_filtered = df_display[
+            (df_display['Date'].dt.date >= date_debut) & (df_display['Date'].dt.date <= date_fin)
+        ]
+
+    # --- RÉSUMÉ AUTO-REGROUPÉ DE LA PÉRIODE SÉLECTIONNÉE ---
+    # Se recalcule à chaque changement de date (rerun Streamlit automatique).
+    cleaner_for_stats = DataCleaner()
+    period_stats = cleaner_for_stats.get_statistics(df_filtered)
+    is_full_period = (date_debut == date_min and date_fin == date_max)
+    label_periode = "période complète" if is_full_period else f"{date_debut.strftime('%d/%m/%Y')} → {date_fin.strftime('%d/%m/%Y')}"
+    st.caption(f"Résumé pour la période sélectionnée ({label_periode}) :")
+    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1.metric("Lignes", len(df_filtered))
+    pc2.metric("Total crédits", f"{period_stats.get('total_credit', 0):,.0f}")
+    pc3.metric("Total débits", f"{period_stats.get('total_debit', 0):,.0f}")
+    pc4.metric("Flux net", f"{period_stats.get('net', 0):,.0f}")
+
+    # --- CONTRÔLE DE COHÉRENCE (sur la période affichée) ---
+    if 'Écart' in df_filtered.columns:
+        anomalies = df_filtered[df_filtered['Écart'].notna() & (df_filtered['Écart'].abs() > 1)]
+        if len(anomalies) > 0:
+            st.warning(
+                f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde "
+                f"incohérent avec la ligne précédente (montant probablement mal lu, ou ligne "
+                f"manquante juste avant). Vérifiez-les contre le PDF original."
+            )
+            with st.expander("Voir les lignes en anomalie"):
+                st.dataframe(
+                    anomalies[[c for c in ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart'] if c in anomalies.columns]],
+                    use_container_width=True,
+                )
+
     # Afficher toutes les colonnes : Date, Référence, Libellé, Débit, Crédit, Solde, Écart
     display_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart']
-    display_df = df_display[[c for c in display_cols if c in df_display.columns]]
+    display_df = df_filtered[[c for c in display_cols if c in df_filtered.columns]]
     st.dataframe(display_df, use_container_width=True, height=400)
 
     # --- EXPORT ---
     st.divider()
     st.subheader("💾 Export")
+    st.caption(f"L'export ci-dessous porte sur la période sélectionnée ci-dessus ({label_periode}, {len(df_filtered)} ligne(s)).")
 
     col_csv, col_xlsx = st.columns(2)
 
     with col_csv:
         # CSV Odoo
-        odoo_export = df_display.copy()
+        odoo_export = df_filtered.copy()
         odoo_export = odoo_export.rename(columns={
             'Date': 'date',
             'Libellé': 'payment_ref',
@@ -474,24 +520,23 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         # Excel complet avec toutes les colonnes + balance
         excel_buffer = io.BytesIO()
         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            # Feuille 1 : Données complètes
+            # Feuille 1 : Données de la période sélectionnée
             sheet1_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde']
-            sheet1_df = df_display[[c for c in sheet1_cols if c in df_display.columns]]
+            sheet1_df = df_filtered[[c for c in sheet1_cols if c in df_filtered.columns]]
             sheet1_df.to_excel(writer, sheet_name='Relevé', index=False)
 
             # Feuille 2 : Export Odoo
             odoo_export.to_excel(writer, sheet_name='Export Odoo', index=False)
 
-            # Feuille 3 : Résumé
+            # Feuille 3 : Résumé (période sélectionnée)
             résumé_df = pd.DataFrame([
-                ('Période début', stats.get('periode_debut', '')),
-                ('Période fin', stats.get('periode_fin', '')),
-                ('Total crédits', stats.get('total_credit', 0)),
-                ('Total débits', stats.get('total_debit', 0)),
-                ('Solde net', stats.get('net', 0)),
-                ('Solde ouverture', stats.get('solde_ouverture', 'N/A')),
-                ('Solde clôture', stats.get('solde_cloture', 'N/A')),
-                ('Nombre de transactions', stats.get('total_transactions', 0)),
+                ('Période', label_periode),
+                ('Total crédits', period_stats.get('total_credit', 0)),
+                ('Total débits', period_stats.get('total_debit', 0)),
+                ('Solde net', period_stats.get('net', 0)),
+                ('Solde ouverture', period_stats.get('solde_ouverture', 'N/A')),
+                ('Solde clôture', period_stats.get('solde_cloture', 'N/A')),
+                ('Nombre de transactions', period_stats.get('total_transactions', 0)),
             ], columns=['Indicateur', 'Valeur'])
             résumé_df.to_excel(writer, sheet_name='Résumé', index=False)
 
