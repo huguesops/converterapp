@@ -6,7 +6,7 @@ Intègre la liste complète des banques du classeur 2026 et la règle spécifiqu
 import sys
 import os
 
-# Resolution du chemin absolu du dossier de l'application pour Streamlit Cloud
+# Résolution du chemin absolu du dossier de l'application pour Streamlit Cloud
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
@@ -14,20 +14,29 @@ if CURRENT_DIR not in sys.path:
 import streamlit as st
 import pandas as pd
 
-# Imports locaux après configuration de sys.path
-try:
-    from bank_configs import KNOWN_BANKS
-    from accounts_database import ACCOUNTS_DIRECTORY
-    from extractor import process_bank_statement_pdf
-    from exporter import export_bank_statement_to_excel
-    from token_counter import estimate_pdf_tokens
-except ImportError:
-    # Alternative de secours si appele depuis le dossier parent
-    from .bank_configs import KNOWN_BANKS
-    from .accounts_database import ACCOUNTS_DIRECTORY
-    from .extractor import process_bank_statement_pdf
-    from .exporter import export_bank_statement_to_excel
-    from .token_counter import estimate_pdf_tokens
+# Imports robustes sans imports relatifs qui provoquent des erreurs sur Streamlit Cloud
+import bank_configs
+import accounts_database
+import cleaner
+import exporter
+import token_counter
+import extractor
+
+# Récupération des constantes et fonctions avec fallbacks de sécurité
+KNOWN_BANKS = getattr(bank_configs, 'KNOWN_BANKS', [])
+ACCOUNTS_DIRECTORY = getattr(accounts_database, 'ACCOUNTS_DIRECTORY', [])
+export_bank_statement_to_excel = getattr(exporter, 'export_bank_statement_to_excel', None)
+estimate_pdf_tokens = getattr(token_counter, 'estimate_pdf_tokens', lambda x: 0)
+
+# Détection de la fonction d'extraction dans extractor.py
+process_bank_statement_pdf = None
+for func_name in ['process_bank_statement_pdf', 'extract_bank_statement', 'extract_statement', 'process_pdf']:
+    if hasattr(extractor, func_name):
+        process_bank_statement_pdf = getattr(extractor, func_name)
+        break
+
+if process_bank_statement_pdf is None:
+    st.error("❌ Impossible de trouver la fonction d'extraction dans extractor.py.")
 
 st.set_page_config(
     page_title="Convertisseur Relevés Bancaires PDF -> Excel",
@@ -105,18 +114,21 @@ if uploaded_file is not None:
                 method = "LOCAL"
                 
             try:
-                df, meta = process_bank_statement_pdf(
-                    pdf_bytes=pdf_bytes,
-                    extraction_method=method,
-                    gemini_key=gemini_key,
-                    openrouter_key=openrouter_key,
-                    bank_hint=bank_hint,
-                    force_bgfi_date=use_bgfi_rule
-                )
-                
-                st.session_state["extracted_df"] = df
-                st.session_state["extracted_meta"] = meta
-                st.success("✅ Conversion réussie !")
+                if process_bank_statement_pdf:
+                    df, meta = process_bank_statement_pdf(
+                        pdf_bytes=pdf_bytes,
+                        extraction_method=method,
+                        gemini_key=gemini_key,
+                        openrouter_key=openrouter_key,
+                        bank_hint=bank_hint,
+                        force_bgfi_date=use_bgfi_rule
+                    )
+                    
+                    st.session_state["extracted_df"] = df
+                    st.session_state["extracted_meta"] = meta
+                    st.success("✅ Conversion réussie !")
+                else:
+                    st.error("Fonction d'extraction introuvable dans extractor.py.")
             except Exception as e:
                 st.error(f"❌ Erreur : {str(e)}")
 
@@ -133,12 +145,13 @@ if "extracted_df" in st.session_state and "extracted_meta" in st.session_state:
     st.subheader("📝 Aperçu du Relevé")
     edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic")
     
-    excel_bytes = export_bank_statement_to_excel(edited_df, meta)
-    filename = f"Releve_{meta.get('bank_name', 'Banque')}_{meta.get('account_number', 'Compte')}.xlsx".replace(" ", "_")
-    
-    st.download_button(
-        label="📥 Télécharger le fichier Excel (.xlsx)",
-        data=excel_bytes,
-        file_name=filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    if export_bank_statement_to_excel:
+        excel_bytes = export_bank_statement_to_excel(edited_df, meta)
+        filename = f"Releve_{meta.get('bank_name', 'Banque')}_{meta.get('account_number', 'Compte')}.xlsx".replace(" ", "_")
+        
+        st.download_button(
+            label="📥 Télécharger le fichier Excel (.xlsx)",
+            data=excel_bytes,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
