@@ -3,18 +3,31 @@ Application Streamlit pour la conversion de relevés bancaires PDF en Excel.
 Intègre la liste complète des banques du classeur 2026 et la règle spécifique BGFI.
 """
 
-import streamlit as st
-import pandas as pd
 import sys
 import os
 
-sys.path.append(os.path.dirname(__file__))
+# Resolution du chemin absolu du dossier de l'application pour Streamlit Cloud
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
 
-from bank_configs import KNOWN_BANKS
-from accounts_database import ACCOUNTS_DIRECTORY
-from extractor import process_bank_statement_pdf
-from exporter import export_bank_statement_to_excel
-from token_counter import estimate_pdf_tokens
+import streamlit as st
+import pandas as pd
+
+# Imports locaux après configuration de sys.path
+try:
+    from bank_configs import KNOWN_BANKS
+    from accounts_database import ACCOUNTS_DIRECTORY
+    from extractor import process_bank_statement_pdf
+    from exporter import export_bank_statement_to_excel
+    from token_counter import estimate_pdf_tokens
+except ImportError:
+    # Alternative de secours si appele depuis le dossier parent
+    from .bank_configs import KNOWN_BANKS
+    from .accounts_database import ACCOUNTS_DIRECTORY
+    from .extractor import process_bank_statement_pdf
+    from .exporter import export_bank_statement_to_excel
+    from .token_counter import estimate_pdf_tokens
 
 st.set_page_config(
     page_title="Convertisseur Relevés Bancaires PDF -> Excel",
@@ -29,7 +42,6 @@ st.caption("Conversion et structuration de relevés bancaires (Banques Classique
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # Liste complète des banques du classeur 2026
     all_banks = [
         "Détection Automatique",
         "CCA BANK",
