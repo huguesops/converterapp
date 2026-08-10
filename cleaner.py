@@ -235,7 +235,14 @@ class DataCleaner:
         df['Écart'] = ecarts
         return df
 
-    def get_statistics(self, df: pd.DataFrame) -> dict:
+    def get_statistics(self, df: pd.DataFrame, banque_nom: str = "Autre banque") -> dict:
+        """Calcule les indicateurs du relevé, dont le solde d'ouverture et le
+        solde de clôture EXACTS tels qu'affichés sur le relevé (extraits
+        directement de la ligne "Ouverture"/"Clôture" du document, jamais
+        recalculés), afin de permettre un contrôle rapide de la cohérence
+        des données extraites (voir 'solde_cloture_calcule' / 'ecart_cloture'
+        / 'coherent' ci-dessous).
+        """
         stats = {
             'total_transactions': 0,
             'total_credit': 0.0,
@@ -243,6 +250,9 @@ class DataCleaner:
             'net': 0.0,
             'solde_ouverture': None,
             'solde_cloture': None,
+            'solde_cloture_calcule': None,
+            'ecart_cloture': None,
+            'coherent': None,
             'periode_debut': '',
             'periode_fin': '',
         }
@@ -250,9 +260,25 @@ class DataCleaner:
         if df.empty:
             return stats
 
+        # Motifs de détection des lignes de solde d'ouverture/clôture :
+        # on combine les motifs génériques historiques avec ceux, propres
+        # à chaque banque, déjà définis dans bank_configs.py (jusqu'ici
+        # non exploités ici), pour repérer fiablement la ligne quelle que
+        # soit la formulation utilisée par le relevé ("Solde d'ouverture",
+        # "Report solde antérieur", "Solde debut", "Solde final", etc.).
+        config = get_bank_config(banque_nom)
+        ouv_patterns = set(config.solde_ouverture_patterns) | {
+            'ouverture', 'opening', 'report solde antérieur'
+        }
+        clo_patterns = set(config.solde_cloture_patterns) | {
+            'cl[ôo]ture', 'cloture', 'solde final', 'solde crediteur', 'total mouvements'
+        }
+        regex_ouv = '|'.join(ouv_patterns)
+        regex_clo = '|'.join(clo_patterns)
+
         lib_lower = df.get('Libellé', pd.Series('')).astype(str).str.lower()
-        mask_ouv = lib_lower.str.contains('ouverture|opening|report solde antérieur', na=False)
-        mask_clo = lib_lower.str.contains('cl[ôo]ture|cloture|solde final|solde crediteur|total mouvements', na=False)
+        mask_ouv = lib_lower.str.contains(regex_ouv, na=False, regex=True)
+        mask_clo = lib_lower.str.contains(regex_clo, na=False, regex=True)
 
         normal_df = df[~(mask_ouv | mask_clo)]
 
@@ -270,6 +296,19 @@ class DataCleaner:
             val = df.loc[mask_clo, 'Solde'].dropna()
             if not val.empty:
                 stats['solde_cloture'] = float(val.iloc[-1])
+
+        # --- CONTRÔLE DE COHÉRENCE GLOBAL ---
+        # Compare le solde de clôture EXACT (lu sur le relevé) au solde de
+        # clôture qu'on obtiendrait en partant du solde d'ouverture EXACT
+        # et en y appliquant le flux net des transactions extraites. Un
+        # écart proche de 0 confirme que rien n'a été omis/mal lu entre les
+        # deux ; un écart significatif signale un problème d'extraction
+        # (ligne manquante, montant mal lu) à vérifier contre le PDF.
+        if stats['solde_ouverture'] is not None:
+            stats['solde_cloture_calcule'] = round(stats['solde_ouverture'] + stats['net'], 2)
+            if stats['solde_cloture'] is not None:
+                stats['ecart_cloture'] = round(stats['solde_cloture'] - stats['solde_cloture_calcule'], 2)
+                stats['coherent'] = abs(stats['ecart_cloture']) <= 1.0
 
         dates = pd.to_datetime(df.get('Date'), format='%d/%m/%Y', errors='coerce').dropna()
         if not dates.empty:
