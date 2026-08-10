@@ -3,14 +3,21 @@ Nettoyage et structuration des données de relevés bancaires.
 Applique la règle propre à BGFI (Date de valeur -> Date d'opération) et la mise en forme des colonnes.
 """
 
-import pandas as pd
-import re
-from typing import Dict, Any, Tuple, Optional
 import sys
 import os
 
-sys.path.append(os.path.dirname(__file__))
-from accounts_database import match_account_details
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
+import pandas as pd
+import re
+from typing import Dict, Any, Tuple, Optional
+
+try:
+    from accounts_database import match_account_details
+except ImportError:
+    from .accounts_database import match_account_details
 
 def clean_amount(val: Any) -> Optional[float]:
     """Nettoie et convertit une valeur en float."""
