@@ -198,7 +198,7 @@ if st.session_state.extraction_in_progress:
                 df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
                 df_clean = cleaner.check_consistency(df_clean)
                 st.session_state.df_clean = df_clean
-                st.session_state.stats = cleaner.get_statistics(df_clean)
+                st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
                 st.session_state.extraction_done = True
                 st.session_state.extraction_in_progress = False
                 st.rerun()
@@ -244,7 +244,7 @@ if st.session_state.extraction_in_progress:
                     df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
                     df_clean = cleaner.check_consistency(df_clean)
                     st.session_state.df_clean = df_clean
-                    st.session_state.stats = cleaner.get_statistics(df_clean)
+                    st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
                     st.session_state.extraction_done = True
                     st.session_state.extraction_in_progress = False
 
@@ -287,7 +287,7 @@ if st.session_state.retry_failed_pages:
             df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
             df_clean = cleaner.check_consistency(df_clean)
             st.session_state.df_clean = df_clean
-            st.session_state.stats = cleaner.get_statistics(df_clean)
+            st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
             st.session_state.retry_failed_pages = False
             st.rerun()
         except Exception as e:
@@ -335,7 +335,7 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         so_val = f"{so:,.0f} FCFA" if so is not None else "N/A"
         st.markdown(f"""
         <div class="metric-card">
-            <div class="label">Solde d'ouverture</div>
+            <div class="label">Solde d'ouverture (tel qu'affiché sur le relevé)</div>
             <div class="value {so_class}">{so_val}</div>
         </div>""", unsafe_allow_html=True)
     
@@ -345,10 +345,10 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         sc_val = f"{sc:,.0f} FCFA" if sc is not None else "N/A"
         st.markdown(f"""
         <div class="metric-card">
-            <div class="label">Solde de clôture</div>
+            <div class="label">Solde de clôture (tel qu'affiché sur le relevé)</div>
             <div class="value {sc_class}">{sc_val}</div>
         </div>""", unsafe_allow_html=True)
-    
+
     with col3:
         net = stats.get('net', 0)
         net_class = "positive" if net >= 0 else "negative"
@@ -357,7 +357,35 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             <div class="label">Flux net</div>
             <div class="value {net_class}">{net:,.0f} FCFA</div>
         </div>""", unsafe_allow_html=True)
-    
+
+    # --- CONTRÔLE RAPIDE DE COHÉRENCE ---
+    # Compare le solde de clôture EXACT extrait du relevé au solde de
+    # clôture que l'on obtient en partant du solde d'ouverture EXACT et en
+    # y ajoutant le flux net des transactions extraites. Permet de
+    # confirmer d'un coup d'œil que rien n'a été omis ou mal lu, sans avoir
+    # à comparer ligne par ligne avec le PDF d'origine.
+    coherent = stats.get('coherent')
+    if coherent is not None:
+        if coherent:
+            st.success(
+                "✅ Cohérence vérifiée : solde d'ouverture + flux net des transactions extraites "
+                f"= {stats['solde_cloture_calcule']:,.0f} FCFA, conforme au solde de clôture affiché "
+                f"sur le relevé ({stats['solde_cloture']:,.0f} FCFA)."
+            )
+        else:
+            st.warning(
+                f"⚠️ Écart de {stats['ecart_cloture']:,.0f} FCFA entre le solde de clôture affiché sur "
+                f"le relevé ({stats['solde_cloture']:,.0f} FCFA) et celui recalculé à partir du solde "
+                f"d'ouverture + flux net des transactions extraites ({stats['solde_cloture_calcule']:,.0f} FCFA). "
+                "Cela indique probablement une ligne manquante ou un montant mal lu — vérifiez les données "
+                "extraites ci-dessous par rapport au PDF original."
+            )
+    elif stats.get('solde_ouverture') is None or stats.get('solde_cloture') is None:
+        st.info(
+            "ℹ️ Solde d'ouverture et/ou de clôture non détecté(s) automatiquement dans les données "
+            "extraites — vérifiez-les manuellement contre le PDF original."
+        )
+
     col4, col5, col6 = st.columns(3)
     with col4:
         st.markdown(f"""
@@ -449,7 +477,7 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     # --- RÉSUMÉ AUTO-REGROUPÉ DE LA PÉRIODE SÉLECTIONNÉE ---
     # Se recalcule à chaque changement de date (rerun Streamlit automatique).
     cleaner_for_stats = DataCleaner()
-    period_stats = cleaner_for_stats.get_statistics(df_filtered)
+    period_stats = cleaner_for_stats.get_statistics(df_filtered, banque_nom=st.session_state.banque_selectionnee)
     is_full_period = (date_debut == date_min and date_fin == date_max)
     label_periode = "période complète" if is_full_period else f"{date_debut.strftime('%d/%m/%Y')} → {date_fin.strftime('%d/%m/%Y')}"
     st.caption(f"Résumé pour la période sélectionnée ({label_periode}) :")
@@ -534,8 +562,10 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
                 ('Total crédits', period_stats.get('total_credit', 0)),
                 ('Total débits', period_stats.get('total_debit', 0)),
                 ('Solde net', period_stats.get('net', 0)),
-                ('Solde ouverture', period_stats.get('solde_ouverture', 'N/A')),
-                ('Solde clôture', period_stats.get('solde_cloture', 'N/A')),
+                ('Solde ouverture (relevé)', period_stats.get('solde_ouverture', 'N/A')),
+                ('Solde clôture (relevé)', period_stats.get('solde_cloture', 'N/A')),
+                ('Solde clôture recalculé (ouverture + flux net)', period_stats.get('solde_cloture_calcule', 'N/A')),
+                ('Écart clôture', period_stats.get('ecart_cloture', 'N/A')),
                 ('Nombre de transactions', period_stats.get('total_transactions', 0)),
             ], columns=['Indicateur', 'Valeur'])
             résumé_df.to_excel(writer, sheet_name='Résumé', index=False)
