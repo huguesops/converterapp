@@ -335,7 +335,7 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         so_val = f"{so:,.0f} FCFA" if so is not None else "N/A"
         st.markdown(f"""
         <div class="metric-card">
-            <div class="label">Solde d'ouverture (tel qu'affiché sur le relevé)</div>
+            <div class="label">Solde d'ouverture (relevé)</div>
             <div class="value {so_class}">{so_val}</div>
         </div>""", unsafe_allow_html=True)
     
@@ -345,10 +345,10 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         sc_val = f"{sc:,.0f} FCFA" if sc is not None else "N/A"
         st.markdown(f"""
         <div class="metric-card">
-            <div class="label">Solde de clôture (tel qu'affiché sur le relevé)</div>
+            <div class="label">Solde de clôture (relevé)</div>
             <div class="value {sc_class}">{sc_val}</div>
         </div>""", unsafe_allow_html=True)
-
+    
     with col3:
         net = stats.get('net', 0)
         net_class = "positive" if net >= 0 else "negative"
@@ -358,34 +358,41 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             <div class="value {net_class}">{net:,.0f} FCFA</div>
         </div>""", unsafe_allow_html=True)
 
-    # --- CONTRÔLE RAPIDE DE COHÉRENCE ---
-    # Compare le solde de clôture EXACT extrait du relevé au solde de
-    # clôture que l'on obtient en partant du solde d'ouverture EXACT et en
-    # y ajoutant le flux net des transactions extraites. Permet de
-    # confirmer d'un coup d'œil que rien n'a été omis ou mal lu, sans avoir
-    # à comparer ligne par ligne avec le PDF d'origine.
-    coherent = stats.get('coherent')
-    if coherent is not None:
-        if coherent:
-            st.success(
-                "✅ Cohérence vérifiée : solde d'ouverture + flux net des transactions extraites "
-                f"= {stats['solde_cloture_calcule']:,.0f} FCFA, conforme au solde de clôture affiché "
-                f"sur le relevé ({stats['solde_cloture']:,.0f} FCFA)."
-            )
-        else:
-            st.warning(
-                f"⚠️ Écart de {stats['ecart_cloture']:,.0f} FCFA entre le solde de clôture affiché sur "
-                f"le relevé ({stats['solde_cloture']:,.0f} FCFA) et celui recalculé à partir du solde "
-                f"d'ouverture + flux net des transactions extraites ({stats['solde_cloture_calcule']:,.0f} FCFA). "
-                "Cela indique probablement une ligne manquante ou un montant mal lu — vérifiez les données "
-                "extraites ci-dessous par rapport au PDF original."
-            )
-    elif stats.get('solde_ouverture') is None or stats.get('solde_cloture') is None:
-        st.info(
-            "ℹ️ Solde d'ouverture et/ou de clôture non détecté(s) automatiquement dans les données "
-            "extraites — vérifiez-les manuellement contre le PDF original."
-        )
+    st.caption(
+        "🔎 Soldes d'ouverture et de clôture tels qu'extraits directement des lignes "
+        "correspondantes du relevé (pas recalculés) — comparez-les au solde affiché sur le "
+        "document original pour un premier contrôle visuel."
+    )
 
+    # --- CONTRÔLE DE COHÉRENCE OUVERTURE ↔ CLÔTURE ---
+    # Le solde de clôture exact du relevé doit être égal au solde
+    # d'ouverture exact + le flux net des transactions extraites. C'est le
+    # contrôle le plus direct de la complétude/exactitude de l'extraction :
+    # si l'écart est proche de 0, les données extraites concordent avec les
+    # deux soldes réellement imprimés sur le relevé.
+    ecart_oc = stats.get('ecart_ouverture_cloture')
+    if ecart_oc is None:
+        if stats.get('solde_ouverture') is None or stats.get('solde_cloture') is None:
+            st.info(
+                "ℹ️ Contrôle de cohérence indisponible : le solde d'ouverture et/ou de "
+                "clôture n'a pas été détecté parmi les lignes extraites. Vérifiez-les "
+                "manuellement sur le relevé original."
+            )
+    elif abs(ecart_oc) <= 1:
+        st.success(
+            f"✅ Cohérence vérifiée : solde d'ouverture ({stats['solde_ouverture']:,.0f} FCFA) "
+            f"+ flux net ({stats['net']:,.0f} FCFA) = solde de clôture attendu, conforme au "
+            f"solde de clôture du relevé ({stats['solde_cloture']:,.0f} FCFA)."
+        )
+    else:
+        st.warning(
+            f"⚠️ Écart de {ecart_oc:,.0f} FCFA entre le solde de clôture du relevé "
+            f"({stats['solde_cloture']:,.0f} FCFA) et le solde attendu à partir de l'ouverture "
+            f"+ flux net ({stats['solde_ouverture'] + stats['net']:,.0f} FCFA). Cela indique "
+            f"probablement une transaction manquante ou mal lue — vérifiez les lignes en "
+            f"anomalie ci-dessous."
+        )
+    
     col4, col5, col6 = st.columns(3)
     with col4:
         st.markdown(f"""
@@ -481,11 +488,21 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     is_full_period = (date_debut == date_min and date_fin == date_max)
     label_periode = "période complète" if is_full_period else f"{date_debut.strftime('%d/%m/%Y')} → {date_fin.strftime('%d/%m/%Y')}"
     st.caption(f"Résumé pour la période sélectionnée ({label_periode}) :")
-    pc1, pc2, pc3, pc4 = st.columns(4)
+    pc1, pc2, pc3, pc4, pc5, pc6 = st.columns(6)
     pc1.metric("Lignes", len(df_filtered))
     pc2.metric("Total crédits", f"{period_stats.get('total_credit', 0):,.0f}")
     pc3.metric("Total débits", f"{period_stats.get('total_debit', 0):,.0f}")
     pc4.metric("Flux net", f"{period_stats.get('net', 0):,.0f}")
+    p_so = period_stats.get('solde_ouverture')
+    p_sc = period_stats.get('solde_cloture')
+    pc5.metric("Solde ouverture (relevé)", f"{p_so:,.0f}" if p_so is not None else "N/A")
+    pc6.metric("Solde clôture (relevé)", f"{p_sc:,.0f}" if p_sc is not None else "N/A")
+    if not is_full_period and p_so is None and p_sc is None:
+        st.caption(
+            "Solde ouverture/clôture non disponibles sur une sous-période qui n'inclut pas "
+            "les lignes d'ouverture/clôture du relevé — sélectionnez la période complète pour "
+            "le contrôle de cohérence."
+        )
 
     # --- CONTRÔLE DE COHÉRENCE (sur la période affichée) ---
     if 'Écart' in df_filtered.columns:
@@ -562,10 +579,8 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
                 ('Total crédits', period_stats.get('total_credit', 0)),
                 ('Total débits', period_stats.get('total_debit', 0)),
                 ('Solde net', period_stats.get('net', 0)),
-                ('Solde ouverture (relevé)', period_stats.get('solde_ouverture', 'N/A')),
-                ('Solde clôture (relevé)', period_stats.get('solde_cloture', 'N/A')),
-                ('Solde clôture recalculé (ouverture + flux net)', period_stats.get('solde_cloture_calcule', 'N/A')),
-                ('Écart clôture', period_stats.get('ecart_cloture', 'N/A')),
+                ('Solde ouverture', period_stats.get('solde_ouverture', 'N/A')),
+                ('Solde clôture', period_stats.get('solde_cloture', 'N/A')),
                 ('Nombre de transactions', period_stats.get('total_transactions', 0)),
             ], columns=['Indicateur', 'Valeur'])
             résumé_df.to_excel(writer, sheet_name='Résumé', index=False)
