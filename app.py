@@ -6,10 +6,13 @@ Génère CSV + Excel avec colonne balance
 import streamlit as st
 import pandas as pd
 import io
+import os
+import json
 import plotly.express as px
 from datetime import datetime
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment
+from streamlit_local_storage import LocalStorage
 
 # Modules personnalisés
 from extractor_openrouter import OpenRouterExtractor
@@ -52,6 +55,60 @@ def get_openrouter_key():
     return st.secrets.get("OPENROUTER_API_KEY", "")
 
 
+# ====================== PERSISTANCE NAVIGATEUR (localStorage) ======================
+# La session doit rester disponible côté navigateur (survit à un rafraîchissement
+# de page ou à une reconnexion) tant que l'utilisateur ne lance pas une nouvelle
+# extraction (bouton "Nouvelle extraction").
+LOCAL_STORAGE_KEY = "skab_session_data"
+localS = LocalStorage()
+
+
+def _save_session_to_browser():
+    """Enregistre le résultat de l'extraction courante dans le localStorage
+    du navigateur, pour pouvoir le restaurer après un rechargement de page."""
+    try:
+        payload = {
+            "df_clean": st.session_state.df_clean.to_json(orient="split", date_format="iso"),
+            "stats": st.session_state.stats,
+            "banque_selectionnee": st.session_state.banque_selectionnee,
+            "uploaded_file_name": st.session_state.get("uploaded_file_name"),
+            "failed_pages": st.session_state.failed_pages,
+        }
+        localS.setItem(LOCAL_STORAGE_KEY, json.dumps(payload), key="skab_set_session")
+    except Exception:
+        # La persistance navigateur est un confort, pas un pré-requis :
+        # on ne bloque jamais l'application si elle échoue (ex : quota localStorage).
+        pass
+
+
+def _clear_session_in_browser():
+    """Supprime la session sauvegardée dans le navigateur (nouvelle extraction)."""
+    try:
+        localS.deleteItem(LOCAL_STORAGE_KEY, key="skab_delete_session")
+    except Exception:
+        pass
+
+
+def _restore_session_from_browser() -> bool:
+    """Restaure une session précédemment sauvegardée dans le navigateur, si elle
+    existe. Retourne True si une session a été restaurée."""
+    try:
+        raw = localS.getItem(LOCAL_STORAGE_KEY, key="skab_get_session")
+        if not raw:
+            return False
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        df_restored = pd.read_json(io.StringIO(payload["df_clean"]), orient="split")
+        st.session_state.df_clean = df_restored
+        st.session_state.stats = payload.get("stats")
+        st.session_state.banque_selectionnee = payload.get("banque_selectionnee", "UNICS")
+        st.session_state.uploaded_file_name = payload.get("uploaded_file_name")
+        st.session_state.failed_pages = payload.get("failed_pages", [])
+        st.session_state.extraction_done = True
+        return True
+    except Exception:
+        return False
+
+
 # Initialisation état session
 if "extraction_done" not in st.session_state:
     st.session_state.update({
@@ -69,7 +126,12 @@ if "extraction_done" not in st.session_state:
         "failed_pages": [],
         "retry_failed_pages": False,
         "last_known_balance": None,
+        "uploaded_file_name": None,
     })
+    # Tant qu'aucune nouvelle extraction n'a été lancée dans cette session
+    # serveur, on tente de restaurer la dernière extraction depuis le
+    # navigateur (utile après un F5 ou une perte de connexion WebSocket).
+    _restore_session_from_browser()
 
 # Nombre de pages traitées par lot avant de rendre la main à Streamlit
 # (st.rerun()). Limite la durée d'exécution ininterrompue du script et
@@ -95,6 +157,7 @@ with st.sidebar:
     # correspondante dans la liste ci-dessous, sans empêcher l'utilisateur
     # de la corriger manuellement ensuite.
     if uploaded_file is not None:
+        st.session_state.uploaded_file_name = uploaded_file.name
         file_sig = f"{uploaded_file.name}:{uploaded_file.size}"
         if st.session_state.get("bank_detect_sig") != file_sig:
             st.session_state.bank_detect_sig = file_sig
@@ -128,6 +191,7 @@ with st.sidebar:
         """)
 
     if st.button("🔄 Nouvelle extraction", use_container_width=True):
+        _clear_session_in_browser()
         for k in list(st.session_state.keys()):
             del st.session_state[k]
         st.rerun()
@@ -203,6 +267,7 @@ if st.session_state.extraction_in_progress:
                 st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
                 st.session_state.extraction_done = True
                 st.session_state.extraction_in_progress = False
+                _save_session_to_browser()
                 st.rerun()
             else:
                 if st.session_state.total_pages is None:
@@ -249,6 +314,7 @@ if st.session_state.extraction_in_progress:
                     st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
                     st.session_state.extraction_done = True
                     st.session_state.extraction_in_progress = False
+                    _save_session_to_browser()
 
                 st.rerun()
 
@@ -291,6 +357,7 @@ if st.session_state.retry_failed_pages:
             st.session_state.df_clean = df_clean
             st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
             st.session_state.retry_failed_pages = False
+            _save_session_to_browser()
             st.rerun()
         except Exception as e:
             st.error(f"❌ Erreur lors du nouvel essai : {str(e)}")
@@ -609,7 +676,8 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             ws.cell(row=row_ptr, column=2, value=libelle)
 
             c_montant = ws.cell(row=row_ptr, column=3, value=montant)
-            c_montant.number_format = '#,##0;-#,##0'
+            # Convention bancaire : crédit = signe (+), débit = signe (-)
+            c_montant.number_format = '+#,##0;-#,##0'
 
             c_solde = ws.cell(row=row_ptr, column=4)
             if row_ptr == 2:
@@ -644,11 +712,33 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             ], columns=['Indicateur', 'Valeur'])
             résumé_df.to_excel(writer, sheet_name='Résumé', index=False)
 
+        # Convention bancaire sur la feuille "Export Odoo" également :
+        # crédit = signe (+), débit = signe (-) sur la colonne "amount".
         excel_buffer.seek(0)
+        wb_final = load_workbook(excel_buffer)
+        if 'Export Odoo' in wb_final.sheetnames:
+            ws_odoo = wb_final['Export Odoo']
+            headers_odoo = [c.value for c in next(ws_odoo.iter_rows(min_row=1, max_row=1))]
+            if 'amount' in headers_odoo:
+                amount_col_idx = headers_odoo.index('amount') + 1
+                for r in range(2, ws_odoo.max_row + 1):
+                    ws_odoo.cell(row=r, column=amount_col_idx).number_format = '+#,##0;-#,##0'
+        excel_buffer = io.BytesIO()
+        wb_final.save(excel_buffer)
+        excel_buffer.seek(0)
+
+        # Le fichier Excel de sortie porte le même nom que le PDF uploadé.
+        source_pdf_name = (
+            st.session_state.get("uploaded_file_name")
+            or (uploaded_file.name if uploaded_file else None)
+            or f"EXPORT_{st.session_state.banque_selectionnee}.pdf"
+        )
+        excel_file_name = f"{os.path.splitext(source_pdf_name)[0]}.xlsx"
+
         st.download_button(
             label="📥 Télécharger Excel",
             data=excel_buffer.getvalue(),
-            file_name=f"EXPORT_{st.session_state.banque_selectionnee}.xlsx",
+            file_name=excel_file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             use_container_width=True,
