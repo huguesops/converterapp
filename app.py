@@ -359,9 +359,9 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         </div>""", unsafe_allow_html=True)
 
     st.caption(
-        "🔎 Soldes d'ouverture et de clôture tels qu'extraits directement des lignes "
-        "correspondantes du relevé (pas recalculés) — comparez-les au solde affiché sur le "
-        "document original pour un premier contrôle visuel."
+        "🔎 Solde d'ouverture = montant de la première ligne du tableau de données extraites "
+        "ci-dessous ; solde de clôture = montant de la dernière ligne (pas recalculés) — "
+        "comparez-les au solde affiché sur le document original pour un premier contrôle visuel."
     )
 
     # --- CONTRÔLE DE COHÉRENCE OUVERTURE ↔ CLÔTURE ---
