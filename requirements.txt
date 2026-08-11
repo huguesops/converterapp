@@ -11,3 +11,4 @@ numpy
 openai
 requests
 plotly
+streamlit-local-storage
