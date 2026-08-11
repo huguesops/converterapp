@@ -1,4 +1,4 @@
-"""
+7"""
 SKAB Bank Statement Extractor - Edition Comptabilité Odoo 18
 Génère CSV + Excel avec colonne balance
 """
@@ -8,6 +8,8 @@ import pandas as pd
 import io
 import plotly.express as px
 from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
 
 # Modules personnalisés
 from extractor_openrouter import OpenRouterExtractor
@@ -564,16 +566,73 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     with col_xlsx:
         # Excel complet avec toutes les colonnes + balance
         excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-            # Feuille 1 : Données de la période sélectionnée
-            sheet1_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde']
-            sheet1_df = df_filtered[[c for c in sheet1_cols if c in df_filtered.columns]]
-            sheet1_df.to_excel(writer, sheet_name='Relevé', index=False)
 
-            # Feuille 2 : Export Odoo
+        # --- Feuille 1 : "RELEVE" (Date / Libellé / Montant / Solde courant),
+        # au format du relevé bancaire de référence (CCA) ---
+        sheet1_cols = ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde']
+        sheet1_df = df_filtered[[c for c in sheet1_cols if c in df_filtered.columns]].reset_index(drop=True)
+
+        montant_series = (
+            pd.to_numeric(sheet1_df.get('Crédit'), errors='coerce').fillna(0)
+            - pd.to_numeric(sheet1_df.get('Débit'), errors='coerce').fillna(0)
+        )
+        solde_series = pd.to_numeric(sheet1_df.get('Solde'), errors='coerce') if 'Solde' in sheet1_df.columns else None
+
+        # Solde d'ouverture déduit de la 1ère ligne (solde relevé - montant de la 1ère ligne)
+        opening_balance = 0.0
+        if solde_series is not None and len(solde_series) and pd.notna(solde_series.iloc[0]):
+            opening_balance = float(solde_series.iloc[0]) - float(montant_series.iloc[0])
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "RELEVE"
+
+        headers = ["Date", "Libellé", "Montant", "Solde courant"]
+        header_fill = PatternFill("solid", fgColor="1F3864")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_align = Alignment(horizontal="center", vertical="center")
+        for col_idx, h in enumerate(headers, 1):
+            c = ws.cell(row=1, column=col_idx, value=h)
+            c.font = header_font
+            c.fill = header_fill
+            c.alignment = header_align
+
+        row_ptr = 2
+        for i in range(len(sheet1_df)):
+            date_val = sheet1_df.iloc[i].get('Date')
+            libelle = sheet1_df.iloc[i].get('Libellé', '')
+            montant = float(montant_series.iloc[i])
+
+            c_date = ws.cell(row=row_ptr, column=1, value=date_val)
+            c_date.number_format = 'yyyy-mm-dd'
+
+            ws.cell(row=row_ptr, column=2, value=libelle)
+
+            c_montant = ws.cell(row=row_ptr, column=3, value=montant)
+            c_montant.number_format = '#,##0;-#,##0'
+
+            c_solde = ws.cell(row=row_ptr, column=4)
+            if row_ptr == 2:
+                c_solde.value = f"={opening_balance:.0f}+C{row_ptr}"
+            else:
+                c_solde.value = f"=D{row_ptr - 1}+C{row_ptr}"
+            c_solde.number_format = '#,##0;-#,##0'
+
+            row_ptr += 1
+
+        ws.column_dimensions['A'].width = 19.11
+        ws.column_dimensions['B'].width = 80.55
+        ws.column_dimensions['C'].width = 16
+        ws.column_dimensions['D'].width = 18
+        ws.freeze_panes = "A5"
+
+        wb.save(excel_buffer)
+
+        # --- Feuilles 2 & 3 : Export Odoo + Résumé (inchangées, ajoutées via pandas) ---
+        excel_buffer.seek(0)
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
             odoo_export.to_excel(writer, sheet_name='Export Odoo', index=False)
 
-            # Feuille 3 : Résumé (période sélectionnée)
             résumé_df = pd.DataFrame([
                 ('Période', label_periode),
                 ('Total crédits', period_stats.get('total_credit', 0)),
