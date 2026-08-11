@@ -10,7 +10,7 @@ import os
 import json
 import plotly.express as px
 from datetime import datetime
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment
 from streamlit_local_storage import LocalStorage
 
@@ -127,11 +127,29 @@ if "extraction_done" not in st.session_state:
         "retry_failed_pages": False,
         "last_known_balance": None,
         "uploaded_file_name": None,
+        "browser_restore_done": False,
+        "browser_restore_attempts": 0,
     })
-    # Tant qu'aucune nouvelle extraction n'a été lancée dans cette session
-    # serveur, on tente de restaurer la dernière extraction depuis le
-    # navigateur (utile après un F5 ou une perte de connexion WebSocket).
-    _restore_session_from_browser()
+
+# Tant qu'aucune extraction n'est déjà chargée en session ET qu'on n'a pas
+# encore réussi/abandonné la restauration, on retente à CHAQUE script-run.
+# C'est nécessaire car le composant localStorage renvoie `None` au tout
+# premier rendu (le temps que son JS se charge côté navigateur) : il faut
+# donc laisser passer 1 ou 2 reruns avant que la vraie valeur soit dispo.
+if (
+    not st.session_state.extraction_done
+    and not st.session_state.extraction_in_progress
+    and not st.session_state.browser_restore_done
+):
+    if _restore_session_from_browser():
+        st.session_state.browser_restore_done = True
+        st.rerun()
+    else:
+        st.session_state.browser_restore_attempts += 1
+        # Au-delà de 5 tentatives, on abandonne (pas de session sauvegardée
+        # ou composant indisponible) pour ne pas bloquer l'utilisateur.
+        if st.session_state.browser_restore_attempts >= 5:
+            st.session_state.browser_restore_done = True
 
 # Nombre de pages traitées par lot avant de rendre la main à Streamlit
 # (st.rerun()). Limite la durée d'exécution ininterrompue du script et
@@ -199,6 +217,21 @@ with st.sidebar:
 # ====================== HEADER ======================
 st.markdown('<div class="main-header"><h1>🏦 SKAB Bank Statement Extractor</h1><p>Génération de fichiers d\'importation pour la comptabilité Odoo</p></div>', unsafe_allow_html=True)
 
+# Filet de sécurité : si la restauration automatique depuis le navigateur n'a
+# rien trouvé (ou le composant a mis trop de temps à répondre), l'utilisateur
+# peut relancer manuellement la tentative sans perdre son upload en cours.
+if (
+    not st.session_state.extraction_done
+    and not st.session_state.extraction_in_progress
+    and not uploaded_file
+):
+    col_restore, _ = st.columns([1, 3])
+    with col_restore:
+        if st.button("🔁 Restaurer la dernière session", use_container_width=True):
+            st.session_state.browser_restore_done = False
+            st.session_state.browser_restore_attempts = 0
+            st.rerun()
+
 # ====================== EXTRACTION ======================
 if (
     uploaded_file
@@ -226,6 +259,7 @@ if st.session_state.show_confirm:
                 # cours de traitement d'un lot déjà commencé).
                 st.session_state.extraction_method = method
                 st.session_state.extraction_in_progress = True
+                st.session_state.browser_restore_done = True
                 st.session_state.show_confirm = False
                 st.session_state.total_pages = None
                 st.session_state.current_page = 1
@@ -676,8 +710,8 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             ws.cell(row=row_ptr, column=2, value=libelle)
 
             c_montant = ws.cell(row=row_ptr, column=3, value=montant)
-            # Convention bancaire : crédit = signe (+), débit = signe (-)
-            c_montant.number_format = '+#,##0;-#,##0'
+            # Convention bancaire : crédit sans signe (format standard), débit = signe (-)
+            c_montant.number_format = '#,##0;-#,##0'
 
             c_solde = ws.cell(row=row_ptr, column=4)
             if row_ptr == 2:
@@ -695,36 +729,6 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         ws.freeze_panes = "A5"
 
         wb.save(excel_buffer)
-
-        # --- Feuilles 2 & 3 : Export Odoo + Résumé (inchangées, ajoutées via pandas) ---
-        excel_buffer.seek(0)
-        with pd.ExcelWriter(excel_buffer, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
-            odoo_export.to_excel(writer, sheet_name='Export Odoo', index=False)
-
-            résumé_df = pd.DataFrame([
-                ('Période', label_periode),
-                ('Total crédits', period_stats.get('total_credit', 0)),
-                ('Total débits', period_stats.get('total_debit', 0)),
-                ('Solde net', period_stats.get('net', 0)),
-                ('Solde ouverture', period_stats.get('solde_ouverture', 'N/A')),
-                ('Solde clôture', period_stats.get('solde_cloture', 'N/A')),
-                ('Nombre de transactions', period_stats.get('total_transactions', 0)),
-            ], columns=['Indicateur', 'Valeur'])
-            résumé_df.to_excel(writer, sheet_name='Résumé', index=False)
-
-        # Convention bancaire sur la feuille "Export Odoo" également :
-        # crédit = signe (+), débit = signe (-) sur la colonne "amount".
-        excel_buffer.seek(0)
-        wb_final = load_workbook(excel_buffer)
-        if 'Export Odoo' in wb_final.sheetnames:
-            ws_odoo = wb_final['Export Odoo']
-            headers_odoo = [c.value for c in next(ws_odoo.iter_rows(min_row=1, max_row=1))]
-            if 'amount' in headers_odoo:
-                amount_col_idx = headers_odoo.index('amount') + 1
-                for r in range(2, ws_odoo.max_row + 1):
-                    ws_odoo.cell(row=r, column=amount_col_idx).number_format = '+#,##0;-#,##0'
-        excel_buffer = io.BytesIO()
-        wb_final.save(excel_buffer)
         excel_buffer.seek(0)
 
         # Le fichier Excel de sortie porte le même nom que le PDF uploadé.
