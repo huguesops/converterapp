@@ -272,15 +272,20 @@ class DataCleaner:
         stats['total_debit'] = float(normal_df.get('Débit', pd.Series(0)).sum(skipna=True) or 0)
         stats['net'] = stats['total_credit'] - stats['total_debit']
 
-        if mask_ouv.any():
-            val = df.loc[mask_ouv, 'Solde'].dropna()
-            if not val.empty:
-                stats['solde_ouverture'] = float(val.iloc[0])
-
-        if mask_clo.any():
-            val = df.loc[mask_clo, 'Solde'].dropna()
-            if not val.empty:
-                stats['solde_cloture'] = float(val.iloc[-1])
+        # Solde d'ouverture / de clôture des cartes du dashboard : on prend
+        # directement le montant de la première et de la dernière ligne du
+        # tableau de prévisualisation des données extraites (même df que
+        # celui affiché à l'écran), plutôt qu'une ligne repérée par motif
+        # texte ("ouverture"/"clôture") qui peut être absente ou mal
+        # libellée selon la banque. Cela garantit que les cartes du
+        # dashboard correspondent toujours à ce que l'utilisateur voit dans
+        # le tableau extrait.
+        if 'Solde' in df.columns:
+            solde_col = pd.to_numeric(df['Solde'], errors='coerce')
+            solde_non_na = solde_col.dropna()
+            if not solde_non_na.empty:
+                stats['solde_ouverture'] = float(solde_non_na.iloc[0])
+                stats['solde_cloture'] = float(solde_non_na.iloc[-1])
 
         # Contrôle de cohérence global : le solde de clôture affiché sur le
         # relevé doit correspondre au solde d'ouverture affiché + le flux
