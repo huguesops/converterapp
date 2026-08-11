@@ -1,4 +1,4 @@
-7"""
+"""
 SKAB Bank Statement Extractor - Edition Comptabilité Odoo 18
 Génère CSV + Excel avec colonne balance
 """
