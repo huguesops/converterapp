@@ -17,7 +17,7 @@ from streamlit_local_storage import LocalStorage
 # Modules personnalisés
 from extractor_openrouter import OpenRouterExtractor
 from cleaner import DataCleaner
-from bank_configs import get_bank_list
+from bank_configs import get_bank_list, get_bank_config
 
 
 # ====================== CONFIGURATION ======================
@@ -672,6 +672,22 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         # au format du relevé bancaire de référence (CCA) ---
         sheet1_cols = ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde']
         sheet1_df = df_filtered[[c for c in sheet1_cols if c in df_filtered.columns]].reset_index(drop=True)
+
+        # Les relevés volumineux sont traités par lots de pages : le modèle
+        # d'extraction relève, sur chaque page, la ligne de "solde
+        # d'ouverture"/"solde de clôture" qu'il y voit — ce qui produit une
+        # ligne de solde à CHAQUE frontière de lot (tous les 8 pages), et pas
+        # uniquement au tout début/à la toute fin du relevé complet. Ces
+        # lignes ne sont pas de vraies transactions : leur montant ne doit
+        # pas s'ajouter au flux, et elles ne doivent pas apparaître dans le
+        # fichier Excel final (la colonne "Solde courant" fait déjà ce
+        # travail de report de solde, ligne par ligne).
+        bank_cfg = get_bank_config(st.session_state.banque_selectionnee)
+        solde_pattern = "|".join(bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns)
+        if solde_pattern and 'Libellé' in sheet1_df.columns:
+            lib_lower = sheet1_df['Libellé'].astype(str).str.lower()
+            is_solde_row = lib_lower.str.contains(solde_pattern, na=False, regex=True)
+            sheet1_df = sheet1_df[~is_solde_row].reset_index(drop=True)
 
         montant_series = (
             pd.to_numeric(sheet1_df.get('Crédit'), errors='coerce').fillna(0)
