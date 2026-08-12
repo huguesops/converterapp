@@ -679,34 +679,53 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         # ligne de solde à CHAQUE frontière de lot (tous les 8 pages), et pas
         # uniquement au tout début/à la toute fin du relevé complet. Ces
         # lignes ne sont pas de vraies transactions : leur montant ne doit
-        # pas s'ajouter au flux, et elles ne doivent pas apparaître dans le
-        # fichier Excel final (la colonne "Solde courant" fait déjà ce
-        # travail de report de solde, ligne par ligne).
+        # JAMAIS alimenter la colonne "Montant" (sinon le solde s'ajoute au
+        # flux et fausse le calcul). On les garde toutefois dans le fichier
+        # Excel final, avec leur valeur affichée uniquement dans la colonne
+        # "Solde courant" (Montant laissé vide pour ces lignes).
         bank_cfg = get_bank_config(st.session_state.banque_selectionnee)
         # Fallback générique si la config de la banque ne fournit pas (ou plus)
         # de patterns : on ne veut jamais laisser une ligne de solde
-        # d'ouverture/clôture non filtrée se retrouver traitée comme une
+        # d'ouverture/clôture non détectée se retrouver traitée comme une
         # transaction (voir colonne "Montant" ci-dessous).
         solde_pattern = "|".join(
             bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns
-        ) or r"ouverture|opening|cl[ôo]ture|cloture|solde\s+d[ée]but|report\s+solde"
+        ) or (
+            r"ouverture|opening|cl[ôo]ture|cloture|solde\s+d[ée]but|"
+            r"solde\s+de\s+d[ée]but|solde\s+au\s+\d{1,2}|report\s+solde"
+        )
         if 'Libellé' in sheet1_df.columns:
             lib_lower = sheet1_df['Libellé'].astype(str).str.lower()
             is_solde_row = lib_lower.str.contains(solde_pattern, na=False, regex=True)
-            sheet1_df = sheet1_df[~is_solde_row].reset_index(drop=True)
+        else:
+            is_solde_row = pd.Series(False, index=sheet1_df.index)
 
+        solde_series = (
+            pd.to_numeric(sheet1_df.get('Solde'), errors='coerce')
+            if 'Solde' in sheet1_df.columns else pd.Series(dtype=float)
+        )
+
+        # Montant = Crédit - Débit pour les vraies transactions uniquement.
+        # Pour les lignes de solde d'ouverture/clôture, le montant reste vide
+        # (None) : leur valeur ne doit apparaître QUE dans "Solde courant".
         montant_series = (
             pd.to_numeric(sheet1_df.get('Crédit'), errors='coerce').fillna(0)
             - pd.to_numeric(sheet1_df.get('Débit'), errors='coerce').fillna(0)
         )
-        solde_series = pd.to_numeric(sheet1_df.get('Solde'), errors='coerce') if 'Solde' in sheet1_df.columns else None
+        montant_series = montant_series.where(~is_solde_row, other=pd.NA)
 
-        # Solde d'ouverture déduit de la 1ère ligne (solde relevé - montant de la 1ère ligne)
-        # → ce solde alimente uniquement la colonne "Solde courant" (via la
-        # formule de la première ligne ci-dessous), jamais la colonne "Montant".
+        # Solde d'ouverture : si la 1ère ligne est explicitement une ligne de
+        # solde d'ouverture/clôture, on prend directement sa valeur "Solde".
+        # Sinon (relevé sans ligne de solde explicite en tête), on la déduit
+        # comme avant : solde relevé - montant de la 1ère ligne.
         opening_balance = 0.0
-        if solde_series is not None and len(solde_series) and pd.notna(solde_series.iloc[0]):
-            opening_balance = float(solde_series.iloc[0]) - float(montant_series.iloc[0])
+        if len(sheet1_df) and len(solde_series) and pd.notna(solde_series.iloc[0]):
+            if is_solde_row.iloc[0]:
+                opening_balance = float(solde_series.iloc[0])
+            else:
+                first_montant = montant_series.iloc[0]
+                first_montant = 0.0 if pd.isna(first_montant) else float(first_montant)
+                opening_balance = float(solde_series.iloc[0]) - first_montant
 
         wb = Workbook()
         ws = wb.active
@@ -726,19 +745,27 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         for i in range(len(sheet1_df)):
             date_val = sheet1_df.iloc[i].get('Date')
             libelle = sheet1_df.iloc[i].get('Libellé', '')
-            montant = float(montant_series.iloc[i])
+            is_solde = bool(is_solde_row.iloc[i])
+            montant_val = montant_series.iloc[i]
 
             c_date = ws.cell(row=row_ptr, column=1, value=date_val)
             c_date.number_format = 'yyyy-mm-dd'
 
             ws.cell(row=row_ptr, column=2, value=libelle)
 
-            c_montant = ws.cell(row=row_ptr, column=3, value=montant)
-            # Convention bancaire : crédit sans signe (format standard), débit = signe (-)
-            c_montant.number_format = '#,##0;-#,##0'
+            c_montant = ws.cell(row=row_ptr, column=3)
+            if not is_solde and pd.notna(montant_val):
+                c_montant.value = float(montant_val)
+                # Convention bancaire : crédit sans signe (format standard), débit = signe (-)
+                c_montant.number_format = '#,##0;-#,##0'
 
             c_solde = ws.cell(row=row_ptr, column=4)
-            if row_ptr == 2:
+            if is_solde and pd.notna(solde_series.iloc[i]):
+                # Ligne de solde d'ouverture/clôture : on affiche la valeur
+                # exacte du relevé, sans passer par le report de la ligne
+                # précédente (évite qu'un écart de flux ne la fasse dériver).
+                c_solde.value = float(solde_series.iloc[i])
+            elif row_ptr == 2:
                 c_solde.value = f"={opening_balance:.0f}+C{row_ptr}"
             else:
                 c_solde.value = f"=D{row_ptr - 1}+C{row_ptr}"
