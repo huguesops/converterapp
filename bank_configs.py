@@ -25,10 +25,12 @@ class BankConfig:
 
     # Patterns pour détecter les lignes spéciales
     solde_ouverture_patterns: List[str] = field(default_factory=lambda: [
-        r"ouverture", r"opening balance", r"report solde", r"solde antérieur", r"solde debut"
+        r"ouverture", r"opening balance", r"report solde", r"solde ant[ée]rieur",
+        r"solde\s+debut", r"solde\s+de\s+d[ée]but", r"solde\s+initial"
     ])
     solde_cloture_patterns: List[str] = field(default_factory=lambda: [
-        r"cl[ôo]ture", r"cloture", r"solde final", r"solde crediteur", r"total mouvements"
+        r"cl[ôo]ture", r"cloture", r"solde final", r"solde crediteur", r"total mouvements",
+        r"solde\s+de\s+fin", r"solde\s+au\s+\d{1,2}"
     ])
 
     # Description détaillée de la structure du relevé pour l'IA
