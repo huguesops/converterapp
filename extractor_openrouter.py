@@ -784,7 +784,13 @@ clairement, réponds exactement : INCONNU"""
         solde = self._fmt_amount(t.get("solde"))
 
         libelle_lower = libelle.lower()
-        is_balance = any(kw in libelle_lower for kw in ["ouverture", "opening", "clôture", "cloture", "closing", "balance final"])
+        is_balance = any(
+            kw in libelle_lower for kw in [
+                "ouverture", "opening", "clôture", "cloture", "closing",
+                "balance final", "début", "debut", "solde initial",
+                "solde final", "solde antérieur", "solde anterieur",
+            ]
+        ) or bool(re.search(r"solde\s+au\s+\d", libelle_lower))
 
         # Si c'est une ligne de solde avec un solde mais sans débit/crédit
         if is_balance and solde is not None and debit is None and credit is None:
