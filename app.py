@@ -683,8 +683,14 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         # fichier Excel final (la colonne "Solde courant" fait déjà ce
         # travail de report de solde, ligne par ligne).
         bank_cfg = get_bank_config(st.session_state.banque_selectionnee)
-        solde_pattern = "|".join(bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns)
-        if solde_pattern and 'Libellé' in sheet1_df.columns:
+        # Fallback générique si la config de la banque ne fournit pas (ou plus)
+        # de patterns : on ne veut jamais laisser une ligne de solde
+        # d'ouverture/clôture non filtrée se retrouver traitée comme une
+        # transaction (voir colonne "Montant" ci-dessous).
+        solde_pattern = "|".join(
+            bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns
+        ) or r"ouverture|opening|cl[ôo]ture|cloture|solde\s+d[ée]but|report\s+solde"
+        if 'Libellé' in sheet1_df.columns:
             lib_lower = sheet1_df['Libellé'].astype(str).str.lower()
             is_solde_row = lib_lower.str.contains(solde_pattern, na=False, regex=True)
             sheet1_df = sheet1_df[~is_solde_row].reset_index(drop=True)
@@ -696,6 +702,8 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         solde_series = pd.to_numeric(sheet1_df.get('Solde'), errors='coerce') if 'Solde' in sheet1_df.columns else None
 
         # Solde d'ouverture déduit de la 1ère ligne (solde relevé - montant de la 1ère ligne)
+        # → ce solde alimente uniquement la colonne "Solde courant" (via la
+        # formule de la première ligne ci-dessous), jamais la colonne "Montant".
         opening_balance = 0.0
         if solde_series is not None and len(solde_series) and pd.notna(solde_series.iloc[0]):
             opening_balance = float(solde_series.iloc[0]) - float(montant_series.iloc[0])
