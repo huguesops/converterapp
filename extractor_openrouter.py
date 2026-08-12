@@ -386,8 +386,9 @@ d'omettre la ligne.
 4. Ne JAMAIS sauter une ligne qui contient un montant en Débit, Crédit ou Solde
 5. Si une description est sur plusieurs lignes, tu dois la fusionner COMPLÈTEMENT en une seule
 6. Montants : retourne uniquement des chiffres sans séparateur (ex: 308000 au lieu de 308,000)
-7. Le solde d'ouverture : mets le montant dans "credit" (c'est un solde créditeur) ou "debit" (si débiteur)
-8. Retourne **uniquement** le JSON suivant, sans aucun commentaire :
+7. Le solde d'ouverture et le solde de clôture ne sont PAS des mouvements : mets leur montant **UNIQUEMENT** dans le champ "solde", et laisse "debit" et "credit" à null pour ces deux lignes. Ne mets JAMAIS le solde d'ouverture ou de clôture dans "debit" ou "credit".
+8. Respecte STRICTEMENT la chronologie du relevé : chaque valeur (date, référence, libellé, débit, crédit, solde) que tu lis appartient à SA PROPRE ligne d'origine sur l'image. Ne décale JAMAIS un montant, un solde ou un libellé vers la ligne du dessus ou du dessous, ne permute pas deux lignes entre elles, et ne réordonne pas les transactions : l'ordre des transactions dans le JSON doit être **exactement** celui, ligne par ligne du haut vers le bas, dans lequel elles apparaissent sur le relevé.
+9. Retourne **uniquement** le JSON suivant, sans aucun commentaire :
 
 {json_example}
 """
