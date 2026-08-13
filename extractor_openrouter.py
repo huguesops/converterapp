@@ -1,6 +1,6 @@
 """
-extractor_openrouter.py - Version 2.2
-Extraction stricte avec verrouillage des pages, lignes et anti-hallucination
+extractor_openrouter.py - Version 2.3
+Extraction universelle avec récupération intelligente des soldes hors-tableau (Afriland)
 """
 
 import base64
@@ -281,14 +281,19 @@ Le solde à la fin de la page précédente était de {previous_balance:,.2f}.
 
         prompt = f"""Tu es un expert comptable très rigoureux spécialisé dans les relevés bancaires camerounais.
 
-**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles **UNIQUEMENT DANS LE TABLEAU PRINCIPAL** (la zone avec les colonnes Date, Libellé, Débit, Crédit, Solde).
+**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles, ainsi que les soldes d'ouverture et de clôture du compte.
 
 **RÈGLES STRICTES ET IMPÉRATIVES** :
-1. **IGNORE L'EN-TÊTE** : Ne lis JAMAIS le bloc de résumé général en haut de la page (ex: "Total des débits", "Total des crédits", "Solde à l'ouverture" hors du tableau). Ton extraction doit commencer STRICTEMENT à la première ligne de données à l'intérieur du grand tableau des opérations.
-2. **Ordre et Numérotation** : Tu dois OBLIGATOIREMENT assigner un `numero_ligne` séquentiel (1, 2, 3...) à chaque transaction extraite. La ligne TOUT EN HAUT du tableau de la page actuelle est la numéro 1. 
-3. **Chronologie visuelle** : L'ordre des transactions dans ton JSON DOIT correspondre EXACTEMENT à la lecture de haut en bas du tableau. Ne mélange jamais les lignes.
-4. **Exhaustivité** : Ne JAMAIS sauter une ligne du tableau. Si une description s'étale sur plusieurs lignes, fusionne-la.
-5. **Format des montants** : Retourne uniquement des chiffres sans séparateur de milliers (ex: 308000 au lieu de 308,000).
+1. **SOLDES D'OUVERTURE ET DE CLÔTURE (CRITIQUE)** : 
+   - Tu DOIS IMPÉRATIVEMENT trouver et extraire le solde initial du relevé (ex: "Solde de début", "Solde à l'ouverture", "Solde au...") et le solde final ("Solde de clôture", "Nouveau solde", "Solde au...").
+   - Si ces soldes sont écrits en dehors du tableau principal (ex: un petit texte juste au-dessus ou en dessous du tableau), insère-les quand même comme la PREMIÈRE (pour l'ouverture) et la DERNIÈRE (pour la clôture) transaction de ton JSON.
+   - Mets leur montant UNIQUEMENT dans le champ "solde" du JSON (laisse "debit" et "credit" à null). Même si le document imprime le chiffre du solde final dans la colonne Crédit ou Débit, tu le mets OBLIGATOIREMENT dans le champ "solde" de ton JSON.
+   - (Exception : Si la toute première ligne *à l'intérieur* du tableau est déjà le solde d'ouverture, utilise cette ligne et ignore le résumé extérieur pour ne pas faire de doublons).
+2. **Lignes à IGNORER** : Tu DOIS IGNORER et ne pas extraire les lignes de sous-totaux (ex: "Total", "Total des mouvements", "Total des débits", "A reporter"). N'extrais QUE les vraies transactions et les Soldes (ouverture/clôture).
+3. **Ordre et Numérotation** : Tu dois OBLIGATOIREMENT assigner un `numero_ligne` séquentiel (1, 2, 3...) à chaque transaction extraite.
+4. **Chronologie visuelle** : L'ordre des transactions dans ton JSON DOIT correspondre EXACTEMENT à la lecture de haut en bas du document. Ne mélange jamais les lignes.
+5. **Exhaustivité** : Ne JAMAIS sauter une vraie ligne de transaction. Si une description s'étale sur plusieurs lignes, fusionne-la.
+6. **Format des montants** : Retourne uniquement des chiffres sans séparateur de milliers (ex: 308000 au lieu de 308,000).
 
 **Structure du relevé {c.nom}** :
 {c.structure_description}
@@ -458,9 +463,7 @@ Retourne **uniquement** le JSON suivant, sans aucun commentaire :
         return []
 
     def _extract_hybrid(self, pdf_bytes: bytes) -> pd.DataFrame:
-        # CONTOURNEMENT DE SÉCURITÉ : Certains PDF bancaires (comme UBA) 
-        # ont des colonnes qui se mélangent horriblement en mode texte.
-        if any(b in self.banque_nom.lower() for b in ["uba", "ecobank", "bicec"]):
+        if any(b in self.banque_nom.lower() for b in ["uba", "ecobank", "bicec", "afriland"]):
             self.logger.info("Format complexe détecté. Basculement automatique en mode VISION pour garantir l'ordre.")
             return self._extract_vision(pdf_bytes)
 
@@ -575,11 +578,15 @@ Retourne **uniquement** le JSON suivant, sans aucun commentaire :
             ]
         ) or bool(re.search(r"solde\s+au\s+\d", libelle_lower))
 
-        if is_balance and solde is not None and debit is None and credit is None:
-            if solde >= 0:
-                credit = solde
-            else:
-                debit = abs(solde)
+        # CORRECTION AFRILAND : On force le solde à se placer dans la bonne colonne
+        if is_balance:
+            if solde is None:
+                # Si l'IA a mis le solde dans crédit ou débit par erreur, on le récupère
+                solde = credit if credit is not None else debit
+            # On force le vide sur crédit et débit pour les lignes de solde
+            # C'est VITAL pour que cleaner.py puisse nettoyer les faux doublons
+            debit = None
+            credit = None
 
         return {
             "numero_ligne": num,
