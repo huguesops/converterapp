@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 4.6
-Ultra-conservatrice : on ne supprime presque rien
+cleaner.py - Version 4.7
+Ultra-conservatrice : on ne supprime presque rien. Conserve l'ordre strict d'origine.
 """
 
 import pandas as pd
@@ -43,16 +43,6 @@ class DataCleaner:
         return s
 
     def _apply_date_valeur_rule(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
-        """Pour les banques dont la config a `date_valeur_is_date=True`
-        (spécificité BGFI), la 'Date Valeur' du relevé doit être utilisée
-        comme date d'opération dans tout l'export (colonne 'Date'), à la
-        place de la date d'opération habituelle.
-
-        On ne substitue que lorsque la Date Valeur est effectivement
-        renseignée sur la ligne, pour ne jamais effacer une date connue
-        (ex : lignes de solde d'ouverture/clôture qui n'ont parfois pas
-        de date de valeur).
-        """
         config = get_bank_config(banque_nom)
         if not config.date_valeur_is_date:
             return df
@@ -77,18 +67,34 @@ class DataCleaner:
         s = str(val).strip()
         if s.lower() in ('null', 'none', ''):
             return None
-        # Ne pas convertir "0" en None (le solde peut être 0)
+        
+        # Retirer les espaces (y compris les espaces insécables)
+        s = s.replace(" ", "").replace("\xa0", "")
+        # Ne garder que les chiffres, points, virgules et le signe moins
+        s = re.sub(r'[^\d.,-]', '', s)
+        if not s: return None
+        
+        # Gestion des formats régionaux pour ne pas fausser les soldes du dashboard
+        if "," in s and "." in s:
+            if s.rfind(",") > s.rfind("."):
+                # La virgule est le séparateur décimal (1.234,56)
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                # Le point est le séparateur décimal (1,234.56)
+                s = s.replace(",", "")
+        elif "," in s:
+            # Seulement une virgule (1234,56) -> on la traite comme un séparateur décimal
+            s = s.replace(",", ".")
+        elif "." in s:
+            if s.count(".") > 1:
+                # Plusieurs points (1.234.567) -> ce sont des séparateurs de milliers
+                s = s.replace(".", "")
+                
         try:
-            s = re.sub(r'[^\d.,-]', '', s)
-            s = s.replace(',', '.')
-            if s.count('.') > 1:
-                s = s.replace('.', '')
-            f = float(s) if s else None
-            return f  # Retourner 0.0 si le montant est 0 (ne pas transformer en None)
+            return float(s)
         except:
             return None
 
-    # Fusion très minimale
     def _merge_libelles_minimal(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'Libellé' not in df.columns or df.empty:
             return df
@@ -100,7 +106,6 @@ class DataCleaner:
             row = df.iloc[i].copy()
             libelle = str(row.get('Libellé', '')).strip()
 
-            # On fusionne seulement si la ligne suivante est vide de date et montant
             if i + 1 < len(df):
                 next_row = df.iloc[i + 1]
                 next_lib = str(next_row.get('Libellé', '')).strip()
@@ -109,7 +114,7 @@ class DataCleaner:
 
                 if not has_date and not has_amount and next_lib:
                     libelle = f"{libelle} {next_lib}".strip()
-                    i += 1   # saute la ligne de continuation
+                    i += 1
 
             row['Libellé'] = libelle
             result.append(row)
@@ -123,29 +128,20 @@ class DataCleaner:
         return df
 
     def _remove_duplicates_minimal(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Supprime uniquement les lignes complètement identiques"""
         if df.empty:
             return df
         return df.drop_duplicates(keep='first')
 
     def _sort_by_date(self, df: pd.DataFrame) -> pd.DataFrame:
-        if 'Date' not in df.columns:
-            return df
-        try:
-            df['_date_sort'] = pd.to_datetime(df['Date'], format='%d/%m/%Y', errors='coerce')
-            df = df.sort_values('_date_sort', na_position='first')
-            df = df.drop(columns=['_date_sort'])
-        except:
-            pass
+        # CORRECTION : On ne trie PLUS par date. L'ordre du document (visuel)
+        # est la vérité absolue. Trier par date désorganisait l'ordre naturel
+        # des opérations (ce qui faussait le calcul de continuité et l'export).
         return df.reset_index(drop=True)
 
     def _post_process_by_bank(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
-        """Post-traitement spécifique selon la banque."""
-        # Normalisation des noms de colonnes
         column_mapping = {
             'Particulars': 'Libellé',
             'Particularités': 'Libellé',
-            'Particulars': 'Libellé',
             'Désignation': 'Libellé',
             'Libellé de l\'opération': 'Libellé',
             'Libelle et Référence': 'Libellé',
@@ -159,32 +155,22 @@ class DataCleaner:
             'Tran Ref': 'Référence',
         }
         
-        # Appliquer le renommage des colonnes si nécessaire
         for col in df.columns:
             if col in column_mapping and column_mapping[col] not in df.columns:
                 df = df.rename(columns={col: column_mapping[col]})
 
-        # Post-traitement spécifique par banque
         banque_lower = banque_nom.lower()
         
         if "unics" in banque_lower:
-            # UNICS : nettoyer les libellés de chèques
             if 'Libellé' in df.columns:
                 df['Libellé'] = df['Libellé'].apply(
                     lambda x: re.sub(r'\s+', ' ', str(x)).strip() if pd.notna(x) else x
                 )
-                
         elif "financial house" in banque_lower:
-            # Financial House : s'assurer que Batch/Ref est bien dans Référence
             pass
-            
         elif "bgfi" in banque_lower:
-            # BGFI : la substitution Date <- Date Valeur est déjà faite
-            # plus tôt dans clean() par _apply_date_valeur_rule().
             pass
-            
         elif "mupeci" in banque_lower:
-            # MUPECI : nettoyer les mentions "Remettant :"
             if 'Libellé' in df.columns:
                 df['Libellé'] = df['Libellé'].apply(
                     lambda x: re.sub(r'Remettant\s*:\s*', '', str(x)).strip() if pd.notna(x) else x
@@ -193,22 +179,6 @@ class DataCleaner:
         return df
 
     def check_consistency(self, df: pd.DataFrame, tolerance: float = 1.0) -> pd.DataFrame:
-        """Ajoute une colonne 'Écart' : différence entre le solde extrait de
-        chaque ligne et le solde attendu (solde de la ligne précédente +
-        crédit - débit de la ligne courante).
-
-        Un écart proche de 0 = ligne cohérente. Un écart important signale
-        une anomalie locale : montant tronqué/mal lu, ligne manquante juste
-        avant, ou ligne dans le mauvais ordre — c'est le point d'entrée pour
-        détecter les erreurs d'extraction sans devoir tout recomparer au PDF
-        à la main.
-
-        NB : ce contrôle est local (il repart du solde extrait de la ligne
-        précédente, pas d'un solde recalculé en cascade) pour qu'une seule
-        ligne fausse ne fasse pas apparaître TOUT ce qui suit comme faux.
-        Une rupture de période (ouverture d'un nouveau mois) est normale et
-        n'est pas comptée comme anomalie.
-        """
         if df.empty or 'Solde' not in df.columns:
             df['Écart'] = None
             return df
@@ -220,7 +190,7 @@ class DataCleaner:
         ecarts = [None] * len(df)
         for i in range(1, len(df)):
             if is_opening.iloc[i]:
-                continue  # nouvelle période : pas de continuité avec la ligne précédente
+                continue
             prev_solde = df.at[i - 1, 'Solde']
             credit = df.at[i, 'Crédit']
             debit = df.at[i, 'Débit']
@@ -251,12 +221,6 @@ class DataCleaner:
         if df.empty:
             return stats
 
-        # Utilise les motifs propres à la banque sélectionnée (définis dans
-        # bank_configs.py) pour repérer les lignes de solde d'ouverture et
-        # de clôture telles qu'elles apparaissent réellement sur CE relevé,
-        # plutôt qu'un motif générique unique valable pour toutes les
-        # banques. Fallback sur des motifs génériques si la config n'en
-        # fournit pas.
         config = get_bank_config(banque_nom)
         pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening"
         pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture"
@@ -272,27 +236,15 @@ class DataCleaner:
         stats['total_debit'] = float(normal_df.get('Débit', pd.Series(0)).sum(skipna=True) or 0)
         stats['net'] = stats['total_credit'] - stats['total_debit']
 
-        # Solde d'ouverture / de clôture des cartes du dashboard : on prend
-        # directement le montant de la première et de la dernière ligne du
-        # tableau de prévisualisation des données extraites (même df que
-        # celui affiché à l'écran), plutôt qu'une ligne repérée par motif
-        # texte ("ouverture"/"clôture") qui peut être absente ou mal
-        # libellée selon la banque. Cela garantit que les cartes du
-        # dashboard correspondent toujours à ce que l'utilisateur voit dans
-        # le tableau extrait.
         if 'Solde' in df.columns:
             solde_col = pd.to_numeric(df['Solde'], errors='coerce')
             solde_non_na = solde_col.dropna()
             if not solde_non_na.empty:
+                # Vu qu'on a désactivé le tri par date, la première et dernière ligne 
+                # correspondent VRAIMENT à l'ouverture et la clôture de la page !
                 stats['solde_ouverture'] = float(solde_non_na.iloc[0])
                 stats['solde_cloture'] = float(solde_non_na.iloc[-1])
 
-        # Contrôle de cohérence global : le solde de clôture affiché sur le
-        # relevé doit correspondre au solde d'ouverture affiché + le flux
-        # net des transactions extraites. Un écart proche de 0 confirme que
-        # les données extraites sont complètes et cohérentes avec les deux
-        # soldes exacts imprimés sur le relevé ; un écart significatif
-        # signale une transaction mal lue ou manquante.
         if stats['solde_ouverture'] is not None and stats['solde_cloture'] is not None:
             attendu = stats['solde_ouverture'] + stats['net']
             stats['ecart_ouverture_cloture'] = round(stats['solde_cloture'] - attendu, 2)
