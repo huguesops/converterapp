@@ -1,7 +1,7 @@
 """
-extractor_openrouter.py - Version 2.0
+extractor_openrouter.py - Version 2.1
 Extraction des relevés bancaires via OpenRouter API
-Correction : strict respect de l'ordre, numérotation séquentielle et clôture
+Correction majeure : Ordre strict (numero_ligne trié par page), exclusion des en-têtes, pdfplumber layout=True
 """
 
 import base64
@@ -187,11 +187,6 @@ class OpenRouterExtractor:
             if response.status_code == 200:
                 data = response.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                usage = data.get("usage", {})
-                if usage:
-                    self.logger.debug(
-                        f"Tokens: {usage.get('prompt_tokens', '?')} prompt / {usage.get('completion_tokens', '?')} completion"
-                    )
                 return content
             elif response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
@@ -200,13 +195,8 @@ class OpenRouterExtractor:
                 time.sleep(min(wait, 15.0))
                 return None
             else:
-                error_detail = response.text[:500]
-                self.logger.error(f"Erreur API {response.status_code}", f"Détail: {error_detail}")
+                self.logger.error(f"Erreur API {response.status_code}", f"Détail: {response.text[:500]}")
                 return None
-
-        except requests.exceptions.Timeout:
-            self.logger.error("Timeout API OpenRouter (180s)")
-            return None
         except Exception as e:
             self.logger.error("Exception appel API", exc=e)
             return None
@@ -248,7 +238,6 @@ class OpenRouterExtractor:
             else:
                 self.logger.error(f"Erreur API {response.status_code}", f"Détail: {response.text[:500]}")
                 return None
-
         except Exception as e:
             self.logger.error("Exception appel API texte", exc=e)
             return None
@@ -272,7 +261,6 @@ class OpenRouterExtractor:
             elif page_text:
                 result = self._call_openrouter_text(page_text, prompt, page_num, model_id=model_id)
             else:
-                self.logger.warning(f"Modèle {model_display} non applicable (pas d'image)")
                 continue
 
             if result and len(result) > 50:
@@ -304,25 +292,21 @@ class OpenRouterExtractor:
         if previous_balance is not None:
             continuity_hint = f"""
 **POINT DE CONTRÔLE (continuité avec la page précédente)** :
-Le solde de la dernière transaction lue sur la page précédente était de
-{previous_balance:,.2f} FCFA. Pour CHAQUE ligne de cette page, vérifie que :
-solde de la ligne = solde de la ligne précédente + crédit − débit
-(le premier solde de cette page doit découler de {previous_balance:,.2f} FCFA,
-sauf si cette page commence par une nouvelle période avec sa propre ligne
-d'ouverture). Si un chiffre est difficile à lire, utilise cette règle de
-continuité pour lever l'ambiguïté plutôt que de deviner. Ne saute AUCUNE
-ligne même si son écriture est petite, tamponnée, ou partiellement
-recouverte par un cachet — dans ce cas, fais de ton mieux pour déduire les
-valeurs manquantes à partir du contexte (solde avant/après) plutôt que
-d'omettre la ligne.
+Le solde de la dernière transaction lue sur la page précédente était de {previous_balance:,.2f} FCFA. 
+Utilise ce solde pour lever toute ambiguïté, mais N'INVENTE PAS de transaction.
 """
 
         prompt = f"""Tu es un expert comptable très rigoureux spécialisé dans les relevés bancaires camerounais.
 
-**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles sur l'image, y compris :
-- La ligne d'ouverture (Opening Balance / Solde d'ouverture)
-- Chaque ligne de transaction individuelle  
-- La ligne de clôture (Closing Balance / Solde de clôture)
+**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles **UNIQUEMENT DANS LE TABLEAU PRINCIPAL** (la zone avec les colonnes Date, Libellé, Débit, Crédit, Solde).
+
+**RÈGLES STRICTES ET IMPÉRATIVES** :
+1. **IGNORE L'EN-TÊTE (TRÈS IMPORTANT)** : Ne lis JAMAIS le bloc de résumé général en haut de la page (qui mentionne par exemple "Total des débits", "Total des crédits", "Solde à l'ouverture" HORS du grand tableau, ou "Solde de clôture" HORS du tableau). Ton extraction doit commencer STRICTEMENT à la première ligne de données à l'intérieur du grand tableau des opérations.
+2. **Ordre et Numérotation** : Tu dois OBLIGATOIREMENT assigner un `numero_ligne` séquentiel (1, 2, 3...) à chaque transaction extraite. La ligne TOUT EN HAUT du tableau doit être la numéro 1. La suivante juste en dessous est la 2, et ainsi de suite jusqu'à la dernière ligne tout en bas.
+3. **Chronologie visuelle** : L'ordre des transactions dans ton JSON DOIT correspondre EXACTEMENT à la lecture de haut en bas du tableau. Ne mélange pas les lignes, ne les inverse jamais de bas en haut.
+4. **Exhaustivité** : Ne JAMAIS sauter une ligne du tableau qui contient un montant en Débit, Crédit ou Solde. Si une description s'étale sur plusieurs lignes, fusionne-la COMPLÈTEMENT.
+5. **Soldes d'ouverture/clôture du tableau** : Si le tableau des opérations commence ou se termine par une ligne "Report", "Solde d'ouverture" ou "Solde de clôture" insérée COMME UNE LIGNE DU TABLEAU, mets son montant UNIQUEMENT dans le champ "solde" (laisse "debit" et "credit" à null).
+6. **Format des montants** : Retourne uniquement des chiffres sans séparateur de milliers (ex: 308000 au lieu de 308,000). Utilise le point comme séparateur décimal (ex: 308000.50).
 
 **Structure du relevé {c.nom}** :
 {c.structure_description}
@@ -330,23 +314,13 @@ d'omettre la ligne.
 **Instructions spécifiques pour {c.nom}** :
 {c.specific_instructions}
 {continuity_hint}
-**RÈGLES STRICTES** :
-1. La première ligne (Opening Balance / Solde d'ouverture) DOIT être extraite avec son solde
-2. La dernière ligne (Closing Balance / Solde de clôture) DOIT être extraite avec son solde
-3. Entre les deux, liste **CHAQUE** ligne une par une, du haut vers le bas, en lui assignant un champ `numero_ligne` strictement séquentiel (1, 2, 3...)
-4. Ne JAMAIS sauter une ligne qui contient un montant en Débit, Crédit ou Solde
-5. Si une description est sur plusieurs lignes, tu dois la fusionner COMPLÈTEMENT en une seule
-6. Montants : retourne uniquement des chiffres sans séparateur (ex: 308000 au lieu de 308,000)
-7. Le solde d'ouverture et le solde de clôture ne sont PAS des mouvements : mets leur montant **UNIQUEMENT** dans le champ "solde", et laisse "debit" et "credit" à null pour ces deux lignes. Ne mets JAMAIS le solde d'ouverture ou de clôture dans "debit" ou "credit".
-8. Respecte STRICTEMENT la chronologie du relevé : chaque valeur (date, référence, libellé, débit, crédit, solde) que tu lis appartient à SA PROPRE ligne d'origine sur l'image. Ne décale JAMAIS un montant, un solde ou un libellé vers la ligne du dessus ou du dessous, ne permute pas deux lignes entre elles. L'ordre des transactions dans le JSON (ainsi que la numérotation `numero_ligne`) doit être **exactement** celui, ligne par ligne du haut vers le bas, dans lequel elles apparaissent sur le relevé.
-9. Retourne **uniquement** le JSON suivant, sans aucun commentaire :
+Retourne **uniquement** le JSON suivant, sans aucun commentaire :
 {json_example}
 """
         return prompt
 
     def extract(self, pdf_bytes: bytes) -> pd.DataFrame:
         self.logger.step(f"Début extraction {self.banque_nom} - Mode {self.mode}")
-
         if self.mode == "hybrid":
             return self._extract_hybrid(pdf_bytes)
         return self._extract_vision(pdf_bytes)
@@ -363,7 +337,6 @@ d'omettre la ligne.
     def detect_bank(self, pdf_bytes: bytes) -> Optional[str]:
         if not PDF2IMAGE_AVAILABLE:
             return None
-
         bank_list = get_bank_list()
         try:
             page_images = convert_from_bytes(pdf_bytes, dpi=150, fmt="PNG", first_page=1, last_page=1)
@@ -371,41 +344,25 @@ d'omettre la ligne.
                 return None
             image = self._optimize_image(page_images[0])
             img_base64 = self._image_to_base64(image)
-        except Exception as e:
-            self.logger.error("Échec conversion page 1 (détection banque)", exc=e)
+        except Exception:
             return None
 
         options_str = "\n".join(f"- {b}" for b in bank_list)
-        prompt = f"""Regarde le logo et l'en-tête de ce relevé bancaire camerounais.
-Identifie à quelle banque/institution il appartient, PARMI CETTE LISTE EXACTE :
-{options_str}
-
-Réponds UNIQUEMENT avec le nom exact d'une des options ci-dessus (copié tel
-quel), sans aucun autre texte. Si tu n'es pas sûr ou si aucune ne correspond
-clairement, réponds exactement : INCONNU"""
-
+        prompt = f"Identifie la banque PARMI CETTE LISTE EXACTE :\n{options_str}\nRéponds UNIQUEMENT le nom, ou INCONNU."
         try:
             raw = self._call_openrouter_vision(img_base64, prompt, page_num=1)
-        except Exception as e:
-            self.logger.error("Échec appel détection banque", exc=e)
+        except Exception:
             return None
 
-        if not raw:
-            return None
-        raw = raw.strip()
-        if raw.upper() == "INCONNU":
+        if not raw or raw.strip().upper() == "INCONNU":
             return None
 
         for b in bank_list:
             if raw.strip().lower() == b.lower():
-                self.logger.success(f"Banque détectée automatiquement : {b}")
                 return b
         for b in bank_list:
             if b.lower() in raw.lower():
-                self.logger.success(f"Banque détectée automatiquement : {b}")
                 return b
-
-        self.logger.warning(f"Détection banque non concluante : réponse='{raw[:80]}'")
         return None
 
     def _dpi_for(self, total_pages: int) -> int:
@@ -418,7 +375,6 @@ clairement, réponds exactement : INCONNU"""
         starting_balance: Optional[float], progress_label: str,
     ) -> List[Dict]:
         if not PDF2IMAGE_AVAILABLE:
-            self.logger.error("pdf2image non disponible")
             return []
 
         dpi = self._dpi_for(total_pages)
@@ -435,7 +391,6 @@ clairement, réponds exactement : INCONNU"""
                     first_page=idx, last_page=idx,
                 )
                 if not page_images:
-                    self.logger.error(f"Conversion vide pour la page {idx}")
                     self.failed_pages.append(idx)
                     return idx, []
                 image = page_images[0]
@@ -491,16 +446,10 @@ clairement, réponds exactement : INCONNU"""
 
     def _extract_vision(self, pdf_bytes: bytes) -> pd.DataFrame:
         if not PDF2IMAGE_AVAILABLE:
-            self.logger.error("pdf2image non disponible")
             return self._empty_df()
-
-        self._update_progress(10, "Analyse du PDF...")
         total_pages = self.get_total_pages(pdf_bytes)
         if total_pages <= 0:
-            self.logger.error("Aucune page détectée dans le PDF")
             return self._empty_df()
-        self.logger.success(f"{total_pages} page(s) détectée(s)")
-
         return self.extract_page_range(pdf_bytes, 1, total_pages, total_pages)
 
     def _process_page_vision(self, image: Image.Image, page_num: int, total_pages: int, prompt: str) -> List[Dict]:
@@ -517,23 +466,18 @@ clairement, réponds exactement : INCONNU"""
             if raw and len(raw) > 50:
                 parsed = self._parse_response(raw, f"page {page_num}")
                 if parsed:
+                    # TRI STRICT DE LA PAGE : respecte l'ordre visuel 1, 2, 3.. donné par le LLM
+                    parsed = sorted(parsed, key=lambda x: x.get("numero_ligne", 0))
                     return parsed
             time.sleep(2)
 
-        self.logger.warning(f"Échec modèle principal page {page_num}, tentative fallback...")
-        self._update_progress(
-            15 + int(70 * page_num / total_pages),
-            f"Analyse page {page_num}/{total_pages} (fallback)",
-        )
-        raw = self._try_fallback(
-            page_image=img_base64,
-            prompt=prompt,
-            page_num=page_num,
-        )
+        raw = self._try_fallback(page_image=img_base64, prompt=prompt, page_num=page_num)
         if raw:
-            return self._parse_response(raw, f"page {page_num} (fallback)")
+            parsed = self._parse_response(raw, f"page {page_num} (fallback)")
+            if parsed:
+                parsed = sorted(parsed, key=lambda x: x.get("numero_ligne", 0))
+                return parsed
 
-        self.logger.warning(f"Page {page_num} ignorée après échec de toutes les tentatives")
         self.failed_pages.append(page_num)
         return []
 
@@ -546,22 +490,23 @@ clairement, réponds exactement : INCONNU"""
             text_content = ""
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 for i, page in enumerate(pdf.pages):
-                    text = page.extract_text() or ""
+                    # layout=True : INDISPENSABLE pour que pdfplumber aligne visuellement 
+                    # le texte au lieu de recracher les colonnes en désordre.
+                    try:
+                        text = page.extract_text(layout=True) or page.extract_text() or ""
+                    except Exception:
+                        text = page.extract_text() or ""
                     text_content += f"\n--- Page {i+1} ---\n{text}"
         except Exception:
             text_content = ""
 
         if text_content and len(text_content.strip()) > 100:
-            self.logger.info("Texte extrait via pdfplumber, analyse IA...")
             return self._extract_text(text_content)
 
-        self.logger.warning("Texte insuffisant, basculement vers mode vision")
         return self._extract_vision(pdf_bytes)
 
     def _extract_text(self, text_content: str) -> pd.DataFrame:
         prompt = self._build_prompt(is_vision=False)
-        self.logger.step("Analyse du texte par l'IA")
-
         max_chars = 30000
         chunks = [text_content[i:i+max_chars] for i in range(0, len(text_content), max_chars)]
 
@@ -582,7 +527,9 @@ clairement, réponds exactement : INCONNU"""
 
             if raw:
                 transactions = self._parse_response(raw, f"chunk {i+1}")
-                all_transactions.extend(transactions)
+                if transactions:
+                    transactions = sorted(transactions, key=lambda x: x.get("numero_ligne", 0))
+                    all_transactions.extend(transactions)
 
         return self._build_dataframe(all_transactions)
 
@@ -605,29 +552,26 @@ clairement, réponds exactement : INCONNU"""
 
         text = re.sub(r"```(?:json)?\s*|\s*```", "", raw, flags=re.IGNORECASE).strip()
 
+        parsed = []
         try:
             data = json.loads(text)
             transactions = data.get("transactions", [])
             if isinstance(transactions, list):
-                parsed = [self._normalize(t) for t in transactions if self._normalize(t)]
-                self.logger.success(f"{len(parsed)} transactions extraites ({context})")
-                return parsed
+                parsed = [t for t in (self._normalize(t) for t in transactions) if t]
         except json.JSONDecodeError:
-            pass
+            json_match = re.search(r'\{[\s\S]*"transactions"[\s\S]*\}', text)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(0))
+                    transactions = data.get("transactions", [])
+                    if isinstance(transactions, list):
+                        parsed = [t for t in (self._normalize(t) for t in transactions) if t]
+                except json.JSONDecodeError:
+                    pass
 
-        json_match = re.search(r'\{[\s\S]*"transactions"[\s\S]*\}', text)
-        if json_match:
-            try:
-                data = json.loads(json_match.group(0))
-                transactions = data.get("transactions", [])
-                if isinstance(transactions, list):
-                    parsed = [self._normalize(t) for t in transactions if self._normalize(t)]
-                    self.logger.success(f"{len(parsed)} transactions extraites après correction ({context})")
-                    return parsed
-            except json.JSONDecodeError:
-                pass
+        if parsed:
+            return parsed
 
-        self.logger.error(f"Échec parsing JSON ({context})", f"Réponse: {raw[:300]}")
         return []
 
     def _normalize(self, t: Dict) -> Optional[Dict]:
@@ -641,6 +585,11 @@ clairement, réponds exactement : INCONNU"""
         debit = self._fmt_amount(t.get("debit") or t.get("débit"))
         credit = self._fmt_amount(t.get("credit") or t.get("crédit"))
         solde = self._fmt_amount(t.get("solde"))
+        
+        try:
+            num = int(t.get("numero_ligne", 0) or 0)
+        except:
+            num = 0
 
         libelle_lower = libelle.lower()
         is_balance = any(
@@ -658,7 +607,7 @@ clairement, réponds exactement : INCONNU"""
                 debit = abs(solde)
 
         return {
-            "numero_ligne": t.get("numero_ligne", 0),
+            "numero_ligne": num,
             "date": str(t.get("date", "")).strip()[:10],
             "reference": str(t.get("reference", "") or t.get("référence", "") or "").strip(),
             "libelle": libelle,
@@ -685,10 +634,10 @@ clairement, réponds exactement : INCONNU"""
 
     def _build_dataframe(self, transactions: List[Dict]) -> pd.DataFrame:
         if not transactions:
-            self.logger.warning("Aucune transaction extraite")
             return self._empty_df()
 
         df = pd.DataFrame([{
+            "Numero_Ligne": t.get("numero_ligne", 0),
             "Date": t["date"],
             "Référence": t["reference"],
             "Libellé": t["libelle"],
@@ -698,11 +647,10 @@ clairement, réponds exactement : INCONNU"""
             "Solde": t["solde"],
         } for t in transactions])
 
-        self.logger.success(f"DataFrame final: {len(df)} lignes")
         return df
 
     def _empty_df(self) -> pd.DataFrame:
-        return pd.DataFrame(columns=["Date", "Référence", "Libellé", "Date_Valeur", "Débit", "Crédit", "Solde"])
+        return pd.DataFrame(columns=["Numero_Ligne", "Date", "Référence", "Libellé", "Date_Valeur", "Débit", "Crédit", "Solde"])
 
     def get_debug_logs(self) -> str:
         return self.logger.get_logs_as_text()
