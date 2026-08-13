@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 5.4
-Correction des décimales FCFA (48.500 -> 48500) et forçage absolu de la Date Valeur pour BGFI.
+cleaner.py - Version 5.5
+Correction du dictionnaire (ajout de "solde au début") pour éliminer les doublons d'en-têtes BGFI de page 2.
 """
 
 import pandas as pd
@@ -18,16 +18,13 @@ class DataCleaner:
         df = df.copy()
 
         df = self._clean_dates(df)
-        # Forçage de la date valeur pour BGFI
         df = self._apply_date_valeur_rule(df, banque_nom)
-        
-        # Nettoyage intelligent des montants FCFA
         df = self._clean_amounts(df)
         df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
         df = self._remove_duplicates_minimal(df)
         
-        # Sécurité anti-hallucination d'Afriland, UBA, etc.
+        # Sécurité anti-hallucination / en-têtes répétés (Afriland, BGFI, etc.)
         df = self._remove_fake_balances(df)
         
         # Tri absolu basé sur la Page -> Numéro de ligne
@@ -89,7 +86,6 @@ class DataCleaner:
         is_bgfi = "bgfi" in banque_nom.lower()
         config = get_bank_config(banque_nom)
         
-        # RÈGLE ABSOLUE POUR BGFI : On écrase la Date standard par la Date Valeur
         if not config.date_valeur_is_date and not is_bgfi:
             return df
             
@@ -115,22 +111,16 @@ class DataCleaner:
         if s.lower() in ('null', 'none', ''):
             return None
         
-        # On retire les espaces insécables
         s = s.replace(" ", "").replace("\xa0", "")
-        # On garde uniquement les chiffres, les points, virgules et le signe moins
         s = re.sub(r'[^\d.,-]', '', s)
         if not s: return None
         
-        # On cherche le tout dernier séparateur (point ou virgule)
         last_sep_idx = max(s.rfind('.'), s.rfind(','))
         
         if last_sep_idx != -1:
             chars_after_sep = len(s) - last_sep_idx - 1
-            # Si le séparateur est suivi d'exactement 3 chiffres (ex: 48.500), 
-            # c'est un séparateur de milliers FCFA, on le supprime !
             if chars_after_sep == 3:
                 s = s.replace(".", "").replace(",", "")
-            # Si le séparateur est suivi de 1 ou 2 chiffres (ex: 48,50), c'est une décimale
             elif chars_after_sep in (1, 2):
                 s = s[:last_sep_idx].replace(".", "").replace(",", "") + "." + s[last_sep_idx+1:]
             else:
@@ -193,10 +183,14 @@ class DataCleaner:
             debit = row.get('Débit')
             credit = row.get('Crédit')
             
+            # On considère une ligne comme "Solde" si elle n'a pas de mouvements, OU
+            # si l'IA l'a sortie avec un débit/crédit de 0 par erreur (comme ici pour BGFI)
             no_mvt = pd.isna(debit) and pd.isna(credit)
+            zero_mvt = (debit == 0 or pd.isna(debit)) and (credit == 0 or pd.isna(credit))
             
-            if no_mvt:
-                if re.search(r'opening|ouverture|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur', lib):
+            if no_mvt or zero_mvt:
+                # Ajout de "(au|de)" pour capter à la fois "Solde de début" ET "Solde au début"
+                if re.search(r'opening|ouverture|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur', lib):
                     opening_indices.append(i)
                 elif re.search(r'closing|cl[ôo]ture|balance\s*final|nouveau\s*solde|solde\s*final', lib):
                     closing_indices.append(i)
@@ -267,7 +261,9 @@ class DataCleaner:
 
         df = df.reset_index(drop=True)
         lib_lower = df.get('Libellé', pd.Series('', index=df.index)).astype(str).str.lower()
-        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*au\s*\d', na=False, regex=True)
+        
+        # Le vérificateur de cohérence doit ignorer TOUTES les lignes d'en-têtes et de soldes
+        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*au\s*\d', na=False, regex=True)
 
         ecarts = [None] * len(df)
         for i in range(1, len(df)):
@@ -304,7 +300,7 @@ class DataCleaner:
             return stats
 
         config = get_bank_config(banque_nom)
-        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*au\s*\d"
+        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*au\s*\d"
         pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final|solde\s*au\s*\d"
 
         lib_lower = df.get('Libellé', pd.Series('')).astype(str).str.lower()
