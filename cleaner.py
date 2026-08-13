@@ -1,6 +1,6 @@
 """
 cleaner.py - Version 4.7
-Ultra-conservatrice : on ne supprime presque rien. Conserve l'ordre strict d'origine.
+Ultra-conservatrice : on ne supprime presque rien. L'ordre d'extraction est la vérité absolue.
 """
 
 import pandas as pd
@@ -18,12 +18,14 @@ class DataCleaner:
         df = df.copy()
 
         df = self._clean_dates(df)
-        df = self._apply_date_valeur_rule(df, banque_nom)  # ex: BGFI
+        df = self._apply_date_valeur_rule(df, banque_nom)
         df = self._clean_amounts(df)
-        df = self._merge_libelles_minimal(df)          # Fusion minimale
+        df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
-        df = self._remove_duplicates_minimal(df)       # Presque aucune suppression
-        df = self._sort_by_date(df)
+        df = self._remove_duplicates_minimal(df)
+        
+        # On ne trie PLUS JAMAIS par date pour ne pas casser l'ordre naturel
+        # des opérations (surtout s'il y a plusieurs transactions le même jour).
         df = self._post_process_by_bank(df, banque_nom)
 
         return df.reset_index(drop=True)
@@ -68,26 +70,19 @@ class DataCleaner:
         if s.lower() in ('null', 'none', ''):
             return None
         
-        # Retirer les espaces (y compris les espaces insécables)
         s = s.replace(" ", "").replace("\xa0", "")
-        # Ne garder que les chiffres, points, virgules et le signe moins
         s = re.sub(r'[^\d.,-]', '', s)
         if not s: return None
         
-        # Gestion des formats régionaux pour ne pas fausser les soldes du dashboard
         if "," in s and "." in s:
             if s.rfind(",") > s.rfind("."):
-                # La virgule est le séparateur décimal (1.234,56)
                 s = s.replace(".", "").replace(",", ".")
             else:
-                # Le point est le séparateur décimal (1,234.56)
                 s = s.replace(",", "")
         elif "," in s:
-            # Seulement une virgule (1234,56) -> on la traite comme un séparateur décimal
             s = s.replace(",", ".")
         elif "." in s:
             if s.count(".") > 1:
-                # Plusieurs points (1.234.567) -> ce sont des séparateurs de milliers
                 s = s.replace(".", "")
                 
         try:
@@ -132,12 +127,6 @@ class DataCleaner:
             return df
         return df.drop_duplicates(keep='first')
 
-    def _sort_by_date(self, df: pd.DataFrame) -> pd.DataFrame:
-        # CORRECTION : On ne trie PLUS par date. L'ordre du document (visuel)
-        # est la vérité absolue. Trier par date désorganisait l'ordre naturel
-        # des opérations (ce qui faussait le calcul de continuité et l'export).
-        return df.reset_index(drop=True)
-
     def _post_process_by_bank(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
         column_mapping = {
             'Particulars': 'Libellé',
@@ -160,16 +149,11 @@ class DataCleaner:
                 df = df.rename(columns={col: column_mapping[col]})
 
         banque_lower = banque_nom.lower()
-        
         if "unics" in banque_lower:
             if 'Libellé' in df.columns:
                 df['Libellé'] = df['Libellé'].apply(
                     lambda x: re.sub(r'\s+', ' ', str(x)).strip() if pd.notna(x) else x
                 )
-        elif "financial house" in banque_lower:
-            pass
-        elif "bgfi" in banque_lower:
-            pass
         elif "mupeci" in banque_lower:
             if 'Libellé' in df.columns:
                 df['Libellé'] = df['Libellé'].apply(
@@ -240,8 +224,6 @@ class DataCleaner:
             solde_col = pd.to_numeric(df['Solde'], errors='coerce')
             solde_non_na = solde_col.dropna()
             if not solde_non_na.empty:
-                # Vu qu'on a désactivé le tri par date, la première et dernière ligne 
-                # correspondent VRAIMENT à l'ouverture et la clôture de la page !
                 stats['solde_ouverture'] = float(solde_non_na.iloc[0])
                 stats['solde_cloture'] = float(solde_non_na.iloc[-1])
 
