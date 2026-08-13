@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 5.2
-Conservation stricte des VRAIES lignes de solde d'ouverture (ADVANS, UBA, etc.).
+cleaner.py - Version 5.3
+Conservation stricte des soldes hors-tableau pour les Dashboard & Dashboard d'Afriland.
 """
 
 import pandas as pd
@@ -24,10 +24,10 @@ class DataCleaner:
         df = self._clean_libelle(df)
         df = self._remove_duplicates_minimal(df)
         
-        # Sécurité : on efface les doublons de faux soldes sans toucher aux vrais
+        # Sécurité : efface uniquement les copies hallucinees par l'IA sur chaque page
         df = self._remove_fake_balances(df)
         
-        # Tri absolu basé sur la Page -> Numéro de ligne (AUCUN TRI PAR DATE)
+        # Tri absolu basé sur la Page -> Numéro de ligne
         df = self._sort_by_page_line(df)
         
         df = self._post_process_by_bank(df, banque_nom)
@@ -166,10 +166,6 @@ class DataCleaner:
         return df.drop_duplicates(keep='first')
 
     def _remove_fake_balances(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Supprime UNIQUEMENT les doublons générés par erreur, mais conserve
-        strictement la première vraie ligne d'ouverture et la dernière de clôture.
-        """
         if df.empty or 'Libellé' not in df.columns:
             return df
             
@@ -186,20 +182,22 @@ class DataCleaner:
             
             no_mvt = pd.isna(debit) and pd.isna(credit)
             
-            # On cherche les lignes de solde (sans mouvement)
+            # Les mots-clés d'Afriland, Advans et UBA sont tous inclus ici
             if no_mvt:
-                # MOTIFS D'OUVERTURE ÉLARGIS (pour inclure ADVANS "Solde au 31/03", etc.)
-                if re.search(r'opening|ouverture|solde\s*au|solde\s*ant[ée]rieur|report', lib):
+                if re.search(r'opening|ouverture|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur', lib):
                     opening_indices.append(i)
-                # MOTIFS DE CLÔTURE
-                elif re.search(r'closing|cl[ôo]ture|balance final|nouveau\s*solde', lib):
+                elif re.search(r'closing|cl[ôo]ture|balance\s*final|nouveau\s*solde|solde\s*final', lib):
                     closing_indices.append(i)
+                elif re.search(r'solde\s*au\s*\d', lib):
+                    if i < len(df) / 2:
+                        opening_indices.append(i)
+                    else:
+                        closing_indices.append(i)
                     
-        # On garde LA TOUTE PREMIÈRE ligne d'ouverture trouvée, on jette les copies
+        # Conservation unique du tout premier pour éviter les doublons IA de page 2
         if len(opening_indices) > 1:
             to_drop.extend(opening_indices[1:])
             
-        # On garde LA TOUTE DERNIÈRE ligne de clôture trouvée, on jette les copies
         if len(closing_indices) > 1:
             to_drop.extend(closing_indices[:-1])
             
@@ -258,7 +256,7 @@ class DataCleaner:
 
         df = df.reset_index(drop=True)
         lib_lower = df.get('Libellé', pd.Series('', index=df.index)).astype(str).str.lower()
-        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*au|report', na=False, regex=True)
+        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*au\s*\d', na=False, regex=True)
 
         ecarts = [None] * len(df)
         for i in range(1, len(df)):
@@ -295,13 +293,14 @@ class DataCleaner:
             return stats
 
         config = get_bank_config(banque_nom)
-        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*au|report"
-        pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture|nouveau\s*solde"
+        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*au\s*\d"
+        pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final|solde\s*au\s*\d"
 
         lib_lower = df.get('Libellé', pd.Series('')).astype(str).str.lower()
         mask_ouv = lib_lower.str.contains(pattern_ouv, na=False, regex=True)
         mask_clo = lib_lower.str.contains(pattern_clo, na=False, regex=True)
 
+        # On isole toutes les transactions pures (sans totaux ou soldes) pour calculer les statistiques
         normal_df = df[~(mask_ouv | mask_clo)]
 
         stats['total_transactions'] = len(normal_df)
