@@ -609,7 +609,9 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
 
     # --- CONTRÔLE DE COHÉRENCE (sur la période affichée) ---
     if 'Écart' in df_filtered.columns:
-        anomalies = df_filtered[df_filtered['Écart'].notna() & (df_filtered['Écart'].abs() > 1)]
+        # Conversion temporaire en numérique pour sécuriser l'opération .abs()
+        ecart_numerique = pd.to_numeric(df_filtered['Écart'], errors='coerce')
+        anomalies = df_filtered[ecart_numerique.notna() & (ecart_numerique.abs() > 1)]
         if len(anomalies) > 0:
             st.warning(
                 f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde "
