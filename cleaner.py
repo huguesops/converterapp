@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 5.0
-Ultra-conservatrice. Nettoyage des soldes fantômes, correction des années OCR, et Tri Infaillible (Page + Ligne).
+cleaner.py - Version 5.1
+Ultra-conservatrice. Nettoyage des soldes fantômes, correction des années OCR (0202 -> 2026), et Tri Infaillible (Page + Ligne).
 """
 
 import pandas as pd
@@ -17,6 +17,7 @@ class DataCleaner:
 
         df = df.copy()
 
+        # On nettoie et corrige les dates OCR (ex: année 0202)
         df = self._clean_dates(df)
         df = self._apply_date_valeur_rule(df, banque_nom)
         df = self._clean_amounts(df)
@@ -39,7 +40,7 @@ class DataCleaner:
             if col in df.columns:
                 df[col] = df[col].apply(self._normalize_date)
                 
-        # Correction automatique des années mal lues par l'OCR (ex: 202 au lieu de 2026)
+        # Correction automatique des années mal lues par l'OCR (ex: 0202 au lieu de 2026)
         if 'Date' in df.columns:
             df = self._fix_years(df)
             
@@ -55,30 +56,33 @@ class DataCleaner:
 
     def _fix_years(self, df: pd.DataFrame) -> pd.DataFrame:
         """Détecte l'année dominante et corrige les années absurdes (< 2000) dues à l'OCR"""
-        dates = pd.to_datetime(df['Date'], format='%d/%m/%Y', errors='coerce')
-        valid_years = dates.dt.year.dropna()
-        if not valid_years.empty:
-            recent_years = valid_years[valid_years >= 2000]
-            if not recent_years.empty:
-                # Année la plus fréquente dans le relevé
-                mode_year = int(recent_years.mode().iloc[0])
-                
-                def fix_date_str(d_str):
-                    d_str = str(d_str).strip()
-                    if not d_str or len(d_str) != 10: 
-                        return d_str
-                    try:
-                        y = int(d_str[6:10])
-                        # Si l'IA a lu "0202" ou "1999" par erreur
-                        if y < 2000 or y > 2100:
-                            return f"{d_str[:6]}{mode_year}"
-                    except:
-                        pass
+        def extract_year(s):
+            s = str(s)
+            match = re.search(r'\b(20\d{2})\b', s)
+            if match:
+                return int(match.group(1))
+            return None
+            
+        years = df['Date'].apply(extract_year).dropna()
+        if not years.empty:
+            mode_year = int(years.mode().iloc[0])
+            
+            def fix_date_str(d_str):
+                d_str = str(d_str).strip()
+                if not d_str:
                     return d_str
+                    
+                def replace_bad_year(m):
+                    y = int(m.group(0))
+                    if y < 2000 or y > 2100:
+                        return str(mode_year)
+                    return m.group(0)
+                    
+                return re.sub(r'\b\d{4}\b', replace_bad_year, d_str)
                 
-                df['Date'] = df['Date'].apply(fix_date_str)
-                if 'Date_Valeur' in df.columns:
-                    df['Date_Valeur'] = df['Date_Valeur'].apply(fix_date_str)
+            df['Date'] = df['Date'].apply(fix_date_str)
+            if 'Date_Valeur' in df.columns:
+                df['Date_Valeur'] = df['Date_Valeur'].apply(fix_date_str)
         return df
 
     def _apply_date_valeur_rule(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
@@ -165,7 +169,6 @@ class DataCleaner:
         return df.drop_duplicates(keep='first')
 
     def _remove_fake_balances(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Supprime les doublons de lignes 'Opening/Closing Balance' inventés par erreur par le LLM"""
         if df.empty or 'Libellé' not in df.columns:
             return df
             
@@ -188,25 +191,21 @@ class DataCleaner:
                 elif re.search(r'closing balance|solde.*cl[ôo]ture|balance final', lib):
                     closing_indices.append(i)
                     
-        # Conserver UNIQUEMENT la vraie première ligne d'ouverture
         if len(opening_indices) > 1:
             to_drop.extend(opening_indices[1:])
             
-        # Conserver UNIQUEMENT la vraie dernière ligne de clôture
         if len(closing_indices) > 1:
             to_drop.extend(closing_indices[:-1])
             
         return df.drop(index=to_drop).reset_index(drop=True)
 
     def _sort_by_page_line(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Tri infaillible garantissant l'ordre visuel absolu du document d'origine"""
         sort_cols = []
         if 'Page_Num' in df.columns:
             sort_cols.append('Page_Num')
         if 'Numero_Ligne' in df.columns:
             sort_cols.append('Numero_Ligne')
             
-        # Le tri par date a été DÉFINITIVEMENT supprimé de cette liste.
         if sort_cols:
             df = df.sort_values(by=sort_cols, kind='mergesort', na_position='first')
         return df.reset_index(drop=True)
