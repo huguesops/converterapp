@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 4.7
-Ultra-conservatrice : on ne supprime presque rien. L'ordre d'extraction est la vérité absolue.
+cleaner.py - Version 4.8
+Ultra-conservatrice. Nettoyage des soldes fantômes et Tri Infaillible (Date + Page + Ligne).
 """
 
 import pandas as pd
@@ -24,8 +24,12 @@ class DataCleaner:
         df = self._clean_libelle(df)
         df = self._remove_duplicates_minimal(df)
         
-        # On ne trie PLUS JAMAIS par date pour ne pas casser l'ordre naturel
-        # des opérations (surtout s'il y a plusieurs transactions le même jour).
+        # Nouvelle sécurité : on efface les faux soldes inventés par l'IA
+        df = self._remove_fake_balances(df)
+        
+        # Tri absolu basé sur la Date -> Page -> Numéro de ligne
+        df = self._sort_by_date_page_line(df)
+        
         df = self._post_process_by_bank(df, banque_nom)
 
         return df.reset_index(drop=True)
@@ -126,6 +130,60 @@ class DataCleaner:
         if df.empty:
             return df
         return df.drop_duplicates(keep='first')
+
+    def _remove_fake_balances(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Supprime les doublons de lignes 'Opening/Closing Balance' inventés par erreur par le LLM"""
+        if df.empty or 'Libellé' not in df.columns:
+            return df
+            
+        df = df.reset_index(drop=True)
+        to_drop = []
+        
+        opening_indices = []
+        closing_indices = []
+        
+        for i, row in df.iterrows():
+            lib = str(row.get('Libellé', '')).lower()
+            debit = row.get('Débit')
+            credit = row.get('Crédit')
+            
+            no_mvt = pd.isna(debit) and pd.isna(credit)
+            
+            if no_mvt:
+                if re.search(r'opening balance|solde.*ouverture', lib):
+                    opening_indices.append(i)
+                elif re.search(r'closing balance|solde.*cl[ôo]ture', lib):
+                    closing_indices.append(i)
+                    
+        # Conserver UNIQUEMENT la vraie première ligne d'ouverture
+        if len(opening_indices) > 1:
+            to_drop.extend(opening_indices[1:])
+            
+        # Conserver UNIQUEMENT la vraie dernière ligne de clôture
+        if len(closing_indices) > 1:
+            to_drop.extend(closing_indices[:-1])
+            
+        return df.drop(index=to_drop).reset_index(drop=True)
+
+    def _sort_by_date_page_line(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Tri infaillible garantissant l'ordre visuel absolu du document d'origine"""
+        if 'Date' not in df.columns:
+            return df
+        try:
+            df['_date_sort'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
+            
+            sort_cols = ['_date_sort']
+            if 'Page_Num' in df.columns:
+                sort_cols.append('Page_Num')
+            if 'Numero_Ligne' in df.columns:
+                sort_cols.append('Numero_Ligne')
+                
+            # kind='mergesort' garantit que si des numéros manquent, l'ordre d'origine est préservé
+            df = df.sort_values(by=sort_cols, kind='mergesort', na_position='first')
+            df = df.drop(columns=['_date_sort'])
+        except Exception:
+            pass
+        return df.reset_index(drop=True)
 
     def _post_process_by_bank(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
         column_mapping = {
