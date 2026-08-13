@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 4.8
-Ultra-conservatrice. Nettoyage des soldes fantômes et Tri Infaillible (Date + Page + Ligne).
+cleaner.py - Version 5.0
+Ultra-conservatrice. Nettoyage des soldes fantômes, correction des années OCR, et Tri Infaillible (Page + Ligne).
 """
 
 import pandas as pd
@@ -24,11 +24,11 @@ class DataCleaner:
         df = self._clean_libelle(df)
         df = self._remove_duplicates_minimal(df)
         
-        # Nouvelle sécurité : on efface les faux soldes inventés par l'IA
+        # Sécurité : on efface les faux soldes parfois inventés par l'IA
         df = self._remove_fake_balances(df)
         
-        # Tri absolu basé sur la Date -> Page -> Numéro de ligne
-        df = self._sort_by_date_page_line(df)
+        # Tri absolu basé sur la Page -> Numéro de ligne (AUCUN TRI PAR DATE)
+        df = self._sort_by_page_line(df)
         
         df = self._post_process_by_bank(df, banque_nom)
 
@@ -38,6 +38,11 @@ class DataCleaner:
         for col in ['Date', 'Date_Valeur']:
             if col in df.columns:
                 df[col] = df[col].apply(self._normalize_date)
+                
+        # Correction automatique des années mal lues par l'OCR (ex: 202 au lieu de 2026)
+        if 'Date' in df.columns:
+            df = self._fix_years(df)
+            
         return df
 
     def _normalize_date(self, val) -> str:
@@ -47,6 +52,34 @@ class DataCleaner:
         if re.match(r'\d{2}/\d{2}/\d{4}', s):
             return s[:10]
         return s
+
+    def _fix_years(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Détecte l'année dominante et corrige les années absurdes (< 2000) dues à l'OCR"""
+        dates = pd.to_datetime(df['Date'], format='%d/%m/%Y', errors='coerce')
+        valid_years = dates.dt.year.dropna()
+        if not valid_years.empty:
+            recent_years = valid_years[valid_years >= 2000]
+            if not recent_years.empty:
+                # Année la plus fréquente dans le relevé
+                mode_year = int(recent_years.mode().iloc[0])
+                
+                def fix_date_str(d_str):
+                    d_str = str(d_str).strip()
+                    if not d_str or len(d_str) != 10: 
+                        return d_str
+                    try:
+                        y = int(d_str[6:10])
+                        # Si l'IA a lu "0202" ou "1999" par erreur
+                        if y < 2000 or y > 2100:
+                            return f"{d_str[:6]}{mode_year}"
+                    except:
+                        pass
+                    return d_str
+                
+                df['Date'] = df['Date'].apply(fix_date_str)
+                if 'Date_Valeur' in df.columns:
+                    df['Date_Valeur'] = df['Date_Valeur'].apply(fix_date_str)
+        return df
 
     def _apply_date_valeur_rule(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
         config = get_bank_config(banque_nom)
@@ -152,7 +185,7 @@ class DataCleaner:
             if no_mvt:
                 if re.search(r'opening balance|solde.*ouverture', lib):
                     opening_indices.append(i)
-                elif re.search(r'closing balance|solde.*cl[ôo]ture', lib):
+                elif re.search(r'closing balance|solde.*cl[ôo]ture|balance final', lib):
                     closing_indices.append(i)
                     
         # Conserver UNIQUEMENT la vraie première ligne d'ouverture
@@ -165,24 +198,17 @@ class DataCleaner:
             
         return df.drop(index=to_drop).reset_index(drop=True)
 
-    def _sort_by_date_page_line(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _sort_by_page_line(self, df: pd.DataFrame) -> pd.DataFrame:
         """Tri infaillible garantissant l'ordre visuel absolu du document d'origine"""
-        if 'Date' not in df.columns:
-            return df
-        try:
-            df['_date_sort'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
+        sort_cols = []
+        if 'Page_Num' in df.columns:
+            sort_cols.append('Page_Num')
+        if 'Numero_Ligne' in df.columns:
+            sort_cols.append('Numero_Ligne')
             
-            sort_cols = ['_date_sort']
-            if 'Page_Num' in df.columns:
-                sort_cols.append('Page_Num')
-            if 'Numero_Ligne' in df.columns:
-                sort_cols.append('Numero_Ligne')
-                
-            # kind='mergesort' garantit que si des numéros manquent, l'ordre d'origine est préservé
+        # Le tri par date a été DÉFINITIVEMENT supprimé de cette liste.
+        if sort_cols:
             df = df.sort_values(by=sort_cols, kind='mergesort', na_position='first')
-            df = df.drop(columns=['_date_sort'])
-        except Exception:
-            pass
         return df.reset_index(drop=True)
 
     def _post_process_by_bank(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
