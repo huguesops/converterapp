@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 5.1
-Ultra-conservatrice. Nettoyage des soldes fantômes, correction des années OCR (0202 -> 2026), et Tri Infaillible (Page + Ligne).
+cleaner.py - Version 5.2
+Conservation stricte des VRAIES lignes de solde d'ouverture (ADVANS, UBA, etc.).
 """
 
 import pandas as pd
@@ -17,7 +17,6 @@ class DataCleaner:
 
         df = df.copy()
 
-        # On nettoie et corrige les dates OCR (ex: année 0202)
         df = self._clean_dates(df)
         df = self._apply_date_valeur_rule(df, banque_nom)
         df = self._clean_amounts(df)
@@ -25,7 +24,7 @@ class DataCleaner:
         df = self._clean_libelle(df)
         df = self._remove_duplicates_minimal(df)
         
-        # Sécurité : on efface les faux soldes parfois inventés par l'IA
+        # Sécurité : on efface les doublons de faux soldes sans toucher aux vrais
         df = self._remove_fake_balances(df)
         
         # Tri absolu basé sur la Page -> Numéro de ligne (AUCUN TRI PAR DATE)
@@ -40,7 +39,6 @@ class DataCleaner:
             if col in df.columns:
                 df[col] = df[col].apply(self._normalize_date)
                 
-        # Correction automatique des années mal lues par l'OCR (ex: 0202 au lieu de 2026)
         if 'Date' in df.columns:
             df = self._fix_years(df)
             
@@ -55,7 +53,6 @@ class DataCleaner:
         return s
 
     def _fix_years(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Détecte l'année dominante et corrige les années absurdes (< 2000) dues à l'OCR"""
         def extract_year(s):
             s = str(s)
             match = re.search(r'\b(20\d{2})\b', s)
@@ -169,6 +166,10 @@ class DataCleaner:
         return df.drop_duplicates(keep='first')
 
     def _remove_fake_balances(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Supprime UNIQUEMENT les doublons générés par erreur, mais conserve
+        strictement la première vraie ligne d'ouverture et la dernière de clôture.
+        """
         if df.empty or 'Libellé' not in df.columns:
             return df
             
@@ -185,15 +186,20 @@ class DataCleaner:
             
             no_mvt = pd.isna(debit) and pd.isna(credit)
             
+            # On cherche les lignes de solde (sans mouvement)
             if no_mvt:
-                if re.search(r'opening balance|solde.*ouverture', lib):
+                # MOTIFS D'OUVERTURE ÉLARGIS (pour inclure ADVANS "Solde au 31/03", etc.)
+                if re.search(r'opening|ouverture|solde\s*au|solde\s*ant[ée]rieur|report', lib):
                     opening_indices.append(i)
-                elif re.search(r'closing balance|solde.*cl[ôo]ture|balance final', lib):
+                # MOTIFS DE CLÔTURE
+                elif re.search(r'closing|cl[ôo]ture|balance final|nouveau\s*solde', lib):
                     closing_indices.append(i)
                     
+        # On garde LA TOUTE PREMIÈRE ligne d'ouverture trouvée, on jette les copies
         if len(opening_indices) > 1:
             to_drop.extend(opening_indices[1:])
             
+        # On garde LA TOUTE DERNIÈRE ligne de clôture trouvée, on jette les copies
         if len(closing_indices) > 1:
             to_drop.extend(closing_indices[:-1])
             
@@ -252,7 +258,7 @@ class DataCleaner:
 
         df = df.reset_index(drop=True)
         lib_lower = df.get('Libellé', pd.Series('', index=df.index)).astype(str).str.lower()
-        is_opening = lib_lower.str.contains('ouverture|opening', na=False)
+        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*au|report', na=False, regex=True)
 
         ecarts = [None] * len(df)
         for i in range(1, len(df)):
@@ -289,8 +295,8 @@ class DataCleaner:
             return stats
 
         config = get_bank_config(banque_nom)
-        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening"
-        pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture"
+        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*au|report"
+        pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture|nouveau\s*solde"
 
         lib_lower = df.get('Libellé', pd.Series('')).astype(str).str.lower()
         mask_ouv = lib_lower.str.contains(pattern_ouv, na=False, regex=True)
