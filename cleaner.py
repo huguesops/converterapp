@@ -1,6 +1,6 @@
 """
-cleaner.py - Version 5.3
-Conservation stricte des soldes hors-tableau pour les Dashboard & Dashboard d'Afriland.
+cleaner.py - Version 5.4
+Correction des décimales FCFA (48.500 -> 48500) et forçage absolu de la Date Valeur pour BGFI.
 """
 
 import pandas as pd
@@ -18,13 +18,16 @@ class DataCleaner:
         df = df.copy()
 
         df = self._clean_dates(df)
+        # Forçage de la date valeur pour BGFI
         df = self._apply_date_valeur_rule(df, banque_nom)
+        
+        # Nettoyage intelligent des montants FCFA
         df = self._clean_amounts(df)
         df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
         df = self._remove_duplicates_minimal(df)
         
-        # Sécurité : efface uniquement les copies hallucinees par l'IA sur chaque page
+        # Sécurité anti-hallucination d'Afriland, UBA, etc.
         df = self._remove_fake_balances(df)
         
         # Tri absolu basé sur la Page -> Numéro de ligne
@@ -83,9 +86,13 @@ class DataCleaner:
         return df
 
     def _apply_date_valeur_rule(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
+        is_bgfi = "bgfi" in banque_nom.lower()
         config = get_bank_config(banque_nom)
-        if not config.date_valeur_is_date:
+        
+        # RÈGLE ABSOLUE POUR BGFI : On écrase la Date standard par la Date Valeur
+        if not config.date_valeur_is_date and not is_bgfi:
             return df
+            
         if 'Date_Valeur' not in df.columns or 'Date' not in df.columns:
             return df
 
@@ -108,20 +115,26 @@ class DataCleaner:
         if s.lower() in ('null', 'none', ''):
             return None
         
+        # On retire les espaces insécables
         s = s.replace(" ", "").replace("\xa0", "")
+        # On garde uniquement les chiffres, les points, virgules et le signe moins
         s = re.sub(r'[^\d.,-]', '', s)
         if not s: return None
         
-        if "," in s and "." in s:
-            if s.rfind(",") > s.rfind("."):
-                s = s.replace(".", "").replace(",", ".")
+        # On cherche le tout dernier séparateur (point ou virgule)
+        last_sep_idx = max(s.rfind('.'), s.rfind(','))
+        
+        if last_sep_idx != -1:
+            chars_after_sep = len(s) - last_sep_idx - 1
+            # Si le séparateur est suivi d'exactement 3 chiffres (ex: 48.500), 
+            # c'est un séparateur de milliers FCFA, on le supprime !
+            if chars_after_sep == 3:
+                s = s.replace(".", "").replace(",", "")
+            # Si le séparateur est suivi de 1 ou 2 chiffres (ex: 48,50), c'est une décimale
+            elif chars_after_sep in (1, 2):
+                s = s[:last_sep_idx].replace(".", "").replace(",", "") + "." + s[last_sep_idx+1:]
             else:
-                s = s.replace(",", "")
-        elif "," in s:
-            s = s.replace(",", ".")
-        elif "." in s:
-            if s.count(".") > 1:
-                s = s.replace(".", "")
+                s = s.replace(".", "").replace(",", "")
                 
         try:
             return float(s)
@@ -182,7 +195,6 @@ class DataCleaner:
             
             no_mvt = pd.isna(debit) and pd.isna(credit)
             
-            # Les mots-clés d'Afriland, Advans et UBA sont tous inclus ici
             if no_mvt:
                 if re.search(r'opening|ouverture|solde\s*de\s*d[ée]but|report|solde\s*ant[ée]rieur', lib):
                     opening_indices.append(i)
@@ -194,7 +206,6 @@ class DataCleaner:
                     else:
                         closing_indices.append(i)
                     
-        # Conservation unique du tout premier pour éviter les doublons IA de page 2
         if len(opening_indices) > 1:
             to_drop.extend(opening_indices[1:])
             
@@ -300,7 +311,6 @@ class DataCleaner:
         mask_ouv = lib_lower.str.contains(pattern_ouv, na=False, regex=True)
         mask_clo = lib_lower.str.contains(pattern_clo, na=False, regex=True)
 
-        # On isole toutes les transactions pures (sans totaux ou soldes) pour calculer les statistiques
         normal_df = df[~(mask_ouv | mask_clo)]
 
         stats['total_transactions'] = len(normal_df)
