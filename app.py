@@ -1,6 +1,6 @@
 """
 SKAB Bank Statement Extractor - Edition Comptabilité Odoo 18
-Génère CSV + Excel (avec Références et Soldes corrigés)
+Génère CSV + Excel (avec Références, Soldes corrigés, et design de cellules propre)
 """
 
 import streamlit as st
@@ -11,7 +11,7 @@ import json
 import plotly.express as px
 from datetime import datetime
 from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from streamlit_local_storage import LocalStorage
 
 # Modules personnalisés
@@ -56,7 +56,6 @@ def get_openrouter_key():
 LOCAL_STORAGE_KEY = "skab_session_data"
 localS = LocalStorage()
 
-
 def _save_session_to_browser():
     try:
         payload = {
@@ -70,13 +69,11 @@ def _save_session_to_browser():
     except Exception:
         pass
 
-
 def _clear_session_in_browser():
     try:
         localS.deleteItem(LOCAL_STORAGE_KEY, key="skab_delete_session")
     except Exception:
         pass
-
 
 def _restore_session_from_browser() -> bool:
     try:
@@ -232,7 +229,7 @@ if st.session_state.show_confirm:
 # ====================== EXTRACTION PAR LOTS ======================
 if st.session_state.extraction_in_progress:
     if not get_openrouter_key():
-        st.error("❌ Clé API OpenRouter manquante. Configurez-la dans les secrets Streamlit.")
+        st.error("❌ Clé API OpenRouter manquante.")
         st.session_state.extraction_in_progress = False
     else:
         try:
@@ -302,7 +299,7 @@ if st.session_state.extraction_in_progress:
             st.error(f"❌ Erreur lors de l'extraction : {str(e)}")
             st.session_state.extraction_in_progress = False
 
-# ====================== NOUVEL ESSAI SUR PAGES EN ÉCHEC ======================
+# ====================== NOUVEL ESSAI ======================
 if st.session_state.retry_failed_pages:
     if not get_openrouter_key():
         st.error("❌ Clé API OpenRouter manquante.")
@@ -345,15 +342,11 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     df_display['Date'] = pd.to_datetime(df_display['Date'], dayfirst=True, errors='coerce')
     df_display = df_display.dropna(subset=['Date'])
 
-    # --- PAGES EN ÉCHEC ---
     if st.session_state.failed_pages:
         pages_str = ", ".join(str(p) for p in st.session_state.failed_pages)
         col_warn, col_btn = st.columns([4, 1])
         with col_warn:
-            st.error(
-                f"⚠️ {len(st.session_state.failed_pages)} page(s) n'ont pas pu être lues "
-                f"et ne sont PAS incluses ci-dessous : page(s) {pages_str}. "
-            )
+            st.error(f"⚠️ {len(st.session_state.failed_pages)} page(s) n'ont pas pu être lues et ne sont PAS incluses : page(s) {pages_str}.")
         with col_btn:
             if st.session_state.extraction_method == "vision" and st.button("🔄 Relancer ces pages", use_container_width=True):
                 st.session_state.retry_failed_pages = True
@@ -361,11 +354,6 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
 
     stats = st.session_state.stats or {}
 
-    def fmt(val):
-        if val is None or val == 'N/A':
-            return 'N/A'
-        return f"{val:,.0f} FCFA"
-    
     col1, col2, col3 = st.columns(3)
     with col1:
         so = stats.get('solde_ouverture')
@@ -396,77 +384,37 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             <div class="value {net_class}">{net:,.0f} FCFA</div>
         </div>""", unsafe_allow_html=True)
 
-    st.caption("🔎 La logique de chevauchement garantit qu'aucune transaction n'est coupée aux sauts de pages.")
+    st.caption("🔎 La logique d'Overlap garantit qu'aucune transaction n'est coupée et que les faux calculs d'IA sont bloqués.")
 
-    # --- CONTRÔLE DE COHÉRENCE OUVERTURE ↔ CLÔTURE ---
     ecart_oc = stats.get('ecart_ouverture_cloture')
     if ecart_oc is None:
         if stats.get('solde_ouverture') is None or stats.get('solde_cloture') is None:
             st.info("ℹ️ Contrôle de cohérence indisponible : soldes d'ouverture/clôture non détectés.")
     elif abs(ecart_oc) <= 1:
-        st.success(
-            f"✅ Cohérence parfaite vérifiée : solde d'ouverture + flux net = solde de clôture attendu."
-        )
+        st.success("✅ Cohérence parfaite vérifiée : solde d'ouverture + flux net = solde de clôture attendu.")
     else:
-        st.warning(
-            f"⚠️ Écart mathématique détecté de {ecart_oc:,.0f} FCFA entre le solde de clôture imprimé "
-            f"et les mouvements extraits. Cela indique qu'une transaction a été mal lue ou oubliée."
-        )
+        st.warning(f"⚠️ Écart mathématique détecté de {ecart_oc:,.0f} FCFA entre le solde de clôture imprimé et les mouvements extraits.")
     
     col4, col5, col6 = st.columns(3)
     with col4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="label">Total crédits</div>
-            <div class="value credit">{stats.get('total_credit', 0):,.0f} FCFA</div>
-        </div>""", unsafe_allow_html=True)
-    
+        st.markdown(f'<div class="metric-card"><div class="label">Total crédits</div><div class="value credit">{stats.get("total_credit", 0):,.0f} FCFA</div></div>', unsafe_allow_html=True)
     with col5:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="label">Total débits</div>
-            <div class="value debit">{stats.get('total_debit', 0):,.0f} FCFA</div>
-        </div>""", unsafe_allow_html=True)
-    
+        st.markdown(f'<div class="metric-card"><div class="label">Total débits</div><div class="value debit">{stats.get("total_debit", 0):,.0f} FCFA</div></div>', unsafe_allow_html=True)
     with col6:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="label">Lignes extraites</div>
-            <div class="value balance">{len(df_display)}</div>
-        </div>""", unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="label">Lignes extraites</div><div class="value balance">{len(df_display)}</div></div>', unsafe_allow_html=True)
 
-    # --- TABLEAU DE BORD / GRAPHIQUE ---
     st.subheader("📊 Flux de trésorerie")
-
     df_display['Débit'] = pd.to_numeric(df_display['Débit'], errors='coerce').fillna(0)
     df_display['Crédit'] = pd.to_numeric(df_display['Crédit'], errors='coerce').fillna(0)
     df_display['Solde_cumulé'] = df_display['Crédit'].cumsum() - df_display['Débit'].cumsum()
 
-    df_chart = df_display.groupby('Date').agg({
-        'Débit': 'sum',
-        'Crédit': 'sum',
-        'Solde_cumulé': 'last'
-    }).reset_index()
+    df_chart = df_display.groupby('Date').agg({'Débit': 'sum', 'Crédit': 'sum', 'Solde_cumulé': 'last'}).reset_index()
 
-    fig = px.bar(
-        df_chart, x='Date', y=['Crédit', 'Débit'],
-        title="Mouvements bancaires", barmode='group',
-        color_discrete_map={"Crédit": "#2ECC71", "Débit": "#E74C3C"},
-        height=400,
-    )
-    fig.add_scatter(
-        x=df_chart['Date'], y=df_chart['Solde_cumulé'],
-        mode='lines+markers', name='Solde',
-        line=dict(color="#1B3A5C", width=3), marker=dict(size=6), yaxis='y',
-    )
-    fig.update_layout(
-        hovermode="x unified", yaxis_title="Montant (FCFA)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=40, r=20, t=40, b=40), font=dict(size=12),
-    )
+    fig = px.bar(df_chart, x='Date', y=['Crédit', 'Débit'], title="Mouvements bancaires", barmode='group', color_discrete_map={"Crédit": "#2ECC71", "Débit": "#E74C3C"}, height=400)
+    fig.add_scatter(x=df_chart['Date'], y=df_chart['Solde_cumulé'], mode='lines+markers', name='Solde', line=dict(color="#1B3A5C", width=3), marker=dict(size=6), yaxis='y')
+    fig.update_layout(hovermode="x unified", yaxis_title="Montant (FCFA)", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(l=40, r=20, t=40, b=40), font=dict(size=12))
     st.plotly_chart(fig, use_container_width=True)
 
-    # -- Données complètes --
     st.divider()
     st.subheader("📋 Données extraites")
 
@@ -480,101 +428,53 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
 
     if date_debut > date_fin:
         st.warning("⚠️ La date de début est postérieure à la date de fin.")
-        df_filtered = df_display.iloc[0:0]
+        df_filtered = df_display.iloc[0:0].copy()
     else:
-        df_filtered = df_display[
-            (df_display['Date'].dt.date >= date_debut) & (df_display['Date'].dt.date <= date_fin)
-        ]
+        df_filtered = df_display[(df_display['Date'].dt.date >= date_debut) & (df_display['Date'].dt.date <= date_fin)].copy()
 
-    # --- RÉSUMÉ DE LA PÉRIODE SÉLECTIONNÉE ---
-    cleaner_for_stats = DataCleaner()
-    period_stats = cleaner_for_stats.get_statistics(df_filtered, banque_nom=st.session_state.banque_selectionnee)
-    is_full_period = (date_debut == date_min and date_fin == date_max)
-    label_periode = "période complète" if is_full_period else f"{date_debut.strftime('%d/%m/%Y')} → {date_fin.strftime('%d/%m/%Y')}"
+    # Formater les dates pour Streamlit sans affecter l'objet pandas réel
+    df_visual = df_filtered.copy()
+    df_visual['Date'] = df_visual['Date'].dt.strftime('%d/%m/%Y')
     
-    if 'Écart' in df_filtered.columns:
-        ecart_numerique = pd.to_numeric(df_filtered['Écart'], errors='coerce')
-        anomalies = df_filtered[ecart_numerique.notna() & (ecart_numerique.abs() > 1)]
-        if len(anomalies) > 0:
-            st.warning(
-                f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde incohérent "
-                f"avec la ligne précédente. L'application a isolé ces lignes pour votre vérification."
-            )
-            with st.expander("Voir les lignes en anomalie"):
-                st.dataframe(anomalies[[c for c in ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart'] if c in anomalies.columns]], use_container_width=True)
-
-    # Affichage du tableau principal
     display_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart']
-    display_df = df_filtered[[c for c in display_cols if c in df_filtered.columns]]
+    display_df = df_visual[[c for c in display_cols if c in df_visual.columns]]
     st.dataframe(display_df, use_container_width=True, height=400)
 
     # --- EXPORT ---
     st.divider()
     st.subheader("💾 Export")
-    st.caption(f"L'export porte sur la période sélectionnée ({label_periode}, {len(df_filtered)} ligne(s)).")
-
+    
     col_csv, col_xlsx = st.columns(2)
 
     with col_csv:
-        # CSV Odoo
         odoo_export = df_filtered.copy()
-        odoo_export = odoo_export.rename(columns={
-            'Date': 'date',
-            'Libellé': 'payment_ref',
-            'Référence': 'ref',
-        })
+        odoo_export['Date'] = odoo_export['Date'].dt.strftime('%Y-%m-%d')
+        odoo_export = odoo_export.rename(columns={'Date': 'date', 'Libellé': 'payment_ref', 'Référence': 'ref'})
         odoo_export['amount'] = odoo_export['Crédit'].fillna(0) - odoo_export['Débit'].fillna(0)
         odoo_export['ref'] = odoo_export['ref'].replace(0, '').replace('0.0', '')
 
-        if 'Solde' in odoo_export.columns:
-            csv_cols = ['date', 'payment_ref', 'amount', 'ref', 'Solde']
-        else:
-            csv_cols = ['date', 'payment_ref', 'amount', 'ref']
-
+        csv_cols = ['date', 'payment_ref', 'amount', 'ref', 'Solde'] if 'Solde' in odoo_export.columns else ['date', 'payment_ref', 'amount', 'ref']
         final_csv = odoo_export[[c for c in csv_cols if c in odoo_export.columns]]
         csv_buffer = io.StringIO()
         final_csv.to_csv(csv_buffer, index=False, encoding='utf-8-sig', sep=',')
         
-        st.download_button(
-            label="📥 Télécharger CSV",
-            data=csv_buffer.getvalue(),
-            file_name=f"EXPORT_{st.session_state.banque_selectionnee}.csv",
-            mime="text/csv",
-            type="primary",
-            use_container_width=True,
-        )
+        st.download_button(label="📥 Télécharger CSV", data=csv_buffer.getvalue(), file_name=f"EXPORT_{st.session_state.banque_selectionnee}.csv", mime="text/csv", type="primary", use_container_width=True)
 
     with col_xlsx:
-        # Excel Complet
         excel_buffer = io.BytesIO()
-
-        # NOUVEAU: Intégration de la colonne "Référence"
         sheet1_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde']
         sheet1_df = df_filtered[[c for c in sheet1_cols if c in df_filtered.columns]].reset_index(drop=True)
 
         bank_cfg = get_bank_config(st.session_state.banque_selectionnee)
-        solde_pattern = "|".join(
-            bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns
-        ) or (
-            r"ouverture|opening|cl[ôo]ture|cloture|solde\s+d[ée]but|"
-            r"solde\s+de\s+d[ée]but|solde\s+au\s+\d{1,2}|report\s+solde"
-        )
+        solde_pattern = "|".join(bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns) or (r"ouverture|opening|cl[ôo]ture|cloture|solde\s+d[ée]but|solde\s+de\s+d[ée]but|solde\s+au\s+\d{1,2}|report\s+solde")
         
         if 'Libellé' in sheet1_df.columns:
-            lib_lower = sheet1_df['Libellé'].astype(str).str.lower()
-            is_solde_row = lib_lower.str.contains(solde_pattern, na=False, regex=True)
+            is_solde_row = sheet1_df['Libellé'].astype(str).str.lower().str.contains(solde_pattern, na=False, regex=True)
         else:
             is_solde_row = pd.Series(False, index=sheet1_df.index)
 
-        solde_series = (
-            pd.to_numeric(sheet1_df.get('Solde'), errors='coerce')
-            if 'Solde' in sheet1_df.columns else pd.Series(dtype=float)
-        )
-
-        montant_series = (
-            pd.to_numeric(sheet1_df.get('Crédit'), errors='coerce').fillna(0)
-            - pd.to_numeric(sheet1_df.get('Débit'), errors='coerce').fillna(0)
-        )
+        solde_series = pd.to_numeric(sheet1_df.get('Solde'), errors='coerce') if 'Solde' in sheet1_df.columns else pd.Series(dtype=float)
+        montant_series = pd.to_numeric(sheet1_df.get('Crédit'), errors='coerce').fillna(0) - pd.to_numeric(sheet1_df.get('Débit'), errors='coerce').fillna(0)
         montant_series = montant_series.where(~is_solde_row, other=pd.NA)
 
         opening_balance = 0.0
@@ -582,25 +482,32 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             if is_solde_row.iloc[0]:
                 opening_balance = float(solde_series.iloc[0])
             else:
-                first_montant = montant_series.iloc[0]
-                first_montant = 0.0 if pd.isna(first_montant) else float(first_montant)
+                first_montant = 0.0 if pd.isna(montant_series.iloc[0]) else float(montant_series.iloc[0])
                 opening_balance = float(solde_series.iloc[0]) - first_montant
 
         wb = Workbook()
         ws = wb.active
         ws.title = "RELEVE"
 
-        # NOUVEAU: Entêtes avec Référence
+        # Design Excel structuré
         headers = ["Date", "Référence", "Libellé", "Montant", "Solde courant"]
         header_fill = PatternFill("solid", fgColor="1F3864")
         header_font = Font(bold=True, color="FFFFFF", size=11)
         header_align = Alignment(horizontal="center", vertical="center")
+        
+        thin_border = Border(
+            left=Side(style='thin', color='D3D3D3'), 
+            right=Side(style='thin', color='D3D3D3'), 
+            top=Side(style='thin', color='D3D3D3'), 
+            bottom=Side(style='thin', color='D3D3D3')
+        )
         
         for col_idx, h in enumerate(headers, 1):
             c = ws.cell(row=1, column=col_idx, value=h)
             c.font = header_font
             c.fill = header_fill
             c.alignment = header_align
+            c.border = thin_border
 
         row_ptr = 2
         for i in range(len(sheet1_df)):
@@ -611,33 +518,34 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             montant_val = montant_series.iloc[i]
 
             c_date = ws.cell(row=row_ptr, column=1, value=date_val)
-            c_date.number_format = 'yyyy-mm-dd'
+            c_date.number_format = 'dd/mm/yyyy'
+            c_date.border = thin_border
 
-            ws.cell(row=row_ptr, column=2, value=ref_val)
-            ws.cell(row=row_ptr, column=3, value=libelle)
+            c_ref = ws.cell(row=row_ptr, column=2, value=ref_val)
+            c_ref.border = thin_border
+            
+            c_lib = ws.cell(row=row_ptr, column=3, value=libelle)
+            c_lib.border = thin_border
 
-            # Montant passe en colonne 4 (D)
             c_montant = ws.cell(row=row_ptr, column=4)
+            c_montant.border = thin_border
             if not is_solde and pd.notna(montant_val):
                 c_montant.value = float(montant_val)
                 c_montant.number_format = '#,##0;-#,##0'
 
-            # Solde passe en colonne 5 (E)
             c_solde = ws.cell(row=row_ptr, column=5)
+            c_solde.border = thin_border
             if is_solde and pd.notna(solde_series.iloc[i]):
                 c_solde.value = float(solde_series.iloc[i])
             elif row_ptr == 2:
-                # Calcul basé sur la colonne D (Montant)
                 c_solde.value = f"={opening_balance:.0f}+D{row_ptr}"
             else:
-                # Calcul basé sur E précédent + D actuel
                 c_solde.value = f"=E{row_ptr - 1}+D{row_ptr}"
                 
             c_solde.number_format = '#,##0;-#,##0'
             row_ptr += 1
 
-        # Ajustement des largeurs de colonnes
-        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['A'].width = 14
         ws.column_dimensions['B'].width = 18
         ws.column_dimensions['C'].width = 65
         ws.column_dimensions['D'].width = 16
@@ -647,20 +555,9 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         wb.save(excel_buffer)
         excel_buffer.seek(0)
 
-        source_pdf_name = (
-            st.session_state.get("uploaded_file_name")
-            or (uploaded_file.name if uploaded_file else None)
-            or f"EXPORT_{st.session_state.banque_selectionnee}.pdf"
-        )
+        source_pdf_name = st.session_state.get("uploaded_file_name") or (uploaded_file.name if uploaded_file else "EXPORT.pdf")
         excel_file_name = f"{os.path.splitext(source_pdf_name)[0]}.xlsx"
 
-        st.download_button(
-            label="📥 Télécharger Excel",
-            data=excel_buffer.getvalue(),
-            file_name=excel_file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True,
-        )
+        st.download_button(label="📥 Télécharger Excel", data=excel_buffer.getvalue(), file_name=excel_file_name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
 
-    st.success("✅ Export prêt !")
+    st.success("✅ Fichiers finaux générés et structurés avec succès !")
