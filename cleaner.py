@@ -1,6 +1,7 @@
 """
-cleaner.py - Version 6.0
-Auto-correction mathématique du solde de clôture pour garantir une cohérence parfaite même si le scan est flou.
+cleaner.py - Version 6.1 (Mise à jour)
+Nettoyage des données extraites avec gestion des chevauchements d'OpenRouter 
+et préservation des alertes d'incohérence mathématique.
 """
 
 import pandas as pd
@@ -22,13 +23,16 @@ class DataCleaner:
         df = self._clean_amounts(df)
         df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
+        
+        # NOUVELLE LOGIQUE : Déduplication intelligente pour gérer les overlaps d'OpenRouter
         df = self._remove_duplicates_minimal(df)
         
         df = self._remove_fake_balances(df)
         df = self._sort_by_page_line(df)
         
-        # NOUVEAU : Auto-calcul mathématique du solde de clôture
-        df = self._auto_correct_closing_balance(df, banque_nom)
+        # NOTE : On ne doit JAMAIS auto-corriger le solde de clôture mathématiquement.
+        # Si une erreur ou un trou survient, l'application (app.py) doit calculer 
+        # l'écart et l'afficher en rouge pour alerter le comptable.
         
         df = self._post_process_by_bank(df, banque_nom)
 
@@ -166,7 +170,30 @@ class DataCleaner:
     def _remove_duplicates_minimal(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
-        return df.drop_duplicates(keep='first')
+            
+        # 1. Suppression stricte classique
+        df = df.drop_duplicates(keep='first').reset_index(drop=True)
+        
+        # 2. Nettoyage ciblé pour les doublons d'Overlap (chevauchement)
+        to_drop = []
+        for i in range(1, len(df)):
+            prev = df.iloc[i-1]
+            curr = df.iloc[i]
+            
+            # Vérification des dates
+            same_date = curr.get('Date') == prev.get('Date')
+            
+            # Vérification des montants (en gérant proprement les NaN)
+            same_debit = (pd.isna(curr.get('Débit')) and pd.isna(prev.get('Débit'))) or (curr.get('Débit') == prev.get('Débit'))
+            same_credit = (pd.isna(curr.get('Crédit')) and pd.isna(prev.get('Crédit'))) or (curr.get('Crédit') == prev.get('Crédit'))
+            
+            # Vérification rigoureuse du solde
+            same_solde = pd.notna(curr.get('Solde')) and (curr.get('Solde') == prev.get('Solde'))
+            
+            if same_date and same_debit and same_credit and same_solde:
+                to_drop.append(i)
+                
+        return df.drop(index=to_drop).reset_index(drop=True)
 
     def _remove_fake_balances(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty or 'Libellé' not in df.columns:
@@ -215,54 +242,6 @@ class DataCleaner:
         if sort_cols:
             df = df.sort_values(by=sort_cols, kind='mergesort', na_position='first')
         return df.reset_index(drop=True)
-
-    def _auto_correct_closing_balance(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
-        """
-        Recalcule mathématiquement le solde de clôture (Ouverture + Crédits - Débits)
-        et écrase la valeur lue par l'OCR. Cela garantit une cohérence parfaite à 100% 
-        et corrige les erreurs de lecture sur les documents flous (ex: CCA Bank).
-        """
-        if df.empty or 'Solde' not in df.columns:
-            return df
-            
-        config = get_bank_config(banque_nom)
-        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent|solde\s*au\s*\d"
-        pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final|solde\s*au\s*\d"
-
-        df_calc = df.copy()
-        lib_lower = df_calc['Libellé'].astype(str).str.lower()
-        
-        # Identifier les lignes de type "Solde"
-        no_mvt = pd.isna(df_calc['Débit']) & pd.isna(df_calc['Crédit'])
-        zero_mvt = ((df_calc['Débit'] == 0) | pd.isna(df_calc['Débit'])) & ((df_calc['Crédit'] == 0) | pd.isna(df_calc['Crédit']))
-        is_balance_line = no_mvt | zero_mvt
-
-        mask_ouv = is_balance_line & lib_lower.str.contains(pattern_ouv, na=False, regex=True)
-        mask_clo = is_balance_line & lib_lower.str.contains(pattern_clo, na=False, regex=True)
-        
-        ouv_indices = df_calc[mask_ouv].index
-        clo_indices = df_calc[mask_clo].index
-        
-        # Si on trouve bien un début et une fin
-        if len(ouv_indices) > 0 and len(clo_indices) > 0:
-            first_ouv_idx = ouv_indices[0]
-            last_clo_idx = clo_indices[-1]
-            
-            # Et que la clôture est bien placée APRÈS l'ouverture
-            if last_clo_idx > first_ouv_idx:
-                solde_ouv = pd.to_numeric(df_calc.at[first_ouv_idx, 'Solde'], errors='coerce')
-                
-                # Calculer le vrai flux net
-                sub_df = df_calc.iloc[first_ouv_idx+1:last_clo_idx]
-                credits = pd.to_numeric(sub_df['Crédit'], errors='coerce').sum()
-                debits = pd.to_numeric(sub_df['Débit'], errors='coerce').sum()
-                
-                # Écrasement chirurgical par le montant mathématique exact
-                if pd.notna(solde_ouv):
-                    solde_calcule = solde_ouv + credits - debits
-                    df_calc.at[last_clo_idx, 'Solde'] = solde_calcule
-                    
-        return df_calc
 
     def _post_process_by_bank(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
         column_mapping = {
