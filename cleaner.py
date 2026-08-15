@@ -1,7 +1,7 @@
 """
-cleaner.py - Version 6.3
-Nettoyage des données, élimination des filigranes, suppression des hallucinations 
-de l'IA (SOLDE INITIAL CALCULE) et verrouillage chronologique.
+cleaner.py - Version 6.4
+Nettoyage des données, élimination des filigranes, suppression agressive 
+des hallucinations de l'IA (SOLDE INITIAL) et verrouillage chronologique.
 """
 
 import pandas as pd
@@ -24,7 +24,8 @@ class DataCleaner:
         df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
         
-        # SUPPRESSION des hallucinations de l'IA (le fameux faux solde)
+        # SUPPRESSION AGRESSIVE des hallucinations de l'IA 
+        # (toutes les variations de "Solde initial" inventées au milieu des pages)
         df = self._remove_ai_hallucinations(df)
         
         # Déduplication intelligente pour gérer les overlaps d'OpenRouter
@@ -48,8 +49,14 @@ class DataCleaner:
         if df.empty or 'Libellé' not in df.columns:
             return df
             
-        # Filtre toutes les variantes de "Solde initial (calcule)"
-        mask = df['Libellé'].astype(str).str.lower().str.contains(r'solde\s*initial\s*\(?calcul[eé]\)?', regex=True)
+        # Filtre toutes les lignes contenant "solde initial" (avec ou sans "calcule")
+        mask = df['Libellé'].astype(str).str.lower().str.contains(r'solde\s*initial', regex=True)
+        
+        # Sécurité : Si la toute première ligne est un "Solde initial", on la conserve 
+        # (au cas où ce serait le vrai libellé d'ouverture imprimé par la banque)
+        if len(df) > 0 and mask.iloc[0]:
+            mask.iloc[0] = False
+            
         return df[~mask].reset_index(drop=True)
 
     def _clean_dates(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -223,7 +230,8 @@ class DataCleaner:
             zero_mvt = (debit == 0 or pd.isna(debit)) and (credit == 0 or pd.isna(credit))
             
             if no_mvt or zero_mvt:
-                if re.search(r'opening|ouverture|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent', lib):
+                # Ajout de "solde initial" pour capturer toutes les fausses lignes d'ouverture générées par erreur
+                if re.search(r'opening|ouverture|solde\s*initial|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent', lib):
                     opening_indices.append(i)
                 elif re.search(r'closing|cl[ôo]ture|balance\s*final|nouveau\s*solde|solde\s*final', lib):
                     closing_indices.append(i)
@@ -258,7 +266,7 @@ class DataCleaner:
             
         lib_lower = df['Libellé'].astype(str).str.lower()
         
-        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent', regex=True)
+        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*initial|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent', regex=True)
         is_closing = lib_lower.str.contains(r'cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final', regex=True)
         
         is_solde_au = lib_lower.str.contains(r'solde\s*au\s*\d', regex=True)
@@ -318,7 +326,7 @@ class DataCleaner:
 
         df = df.reset_index(drop=True)
         lib_lower = df.get('Libellé', pd.Series('', index=df.index)).astype(str).str.lower()
-        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent|solde\s*au\s*\d', na=False, regex=True)
+        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*initial|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent|solde\s*au\s*\d', na=False, regex=True)
 
         ecarts = [None] * len(df)
         for i in range(1, len(df)):
@@ -349,7 +357,7 @@ class DataCleaner:
             return stats
 
         config = get_bank_config(banque_nom)
-        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent|solde\s*au\s*\d"
+        pattern_ouv = "|".join(config.solde_ouverture_patterns) or r"ouverture|opening|solde\s*initial|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent|solde\s*au\s*\d"
         pattern_clo = "|".join(config.solde_cloture_patterns) or r"cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final|solde\s*au\s*\d"
 
         lib_lower = df.get('Libellé', pd.Series('')).astype(str).str.lower()
