@@ -1,7 +1,7 @@
 """
-cleaner.py - Version 6.1 (Mise à jour)
-Nettoyage des données extraites avec gestion des chevauchements d'OpenRouter 
-et préservation des alertes d'incohérence mathématique.
+cleaner.py - Version 6.2 (Mise à jour Finale)
+Nettoyage des données, élimination des filigranes PDF (ex: UBA) 
+et verrouillage chronologique absolu des soldes d'ouverture/clôture.
 """
 
 import pandas as pd
@@ -24,15 +24,15 @@ class DataCleaner:
         df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
         
-        # NOUVELLE LOGIQUE : Déduplication intelligente pour gérer les overlaps d'OpenRouter
+        # Déduplication intelligente pour gérer les overlaps d'OpenRouter
         df = self._remove_duplicates_minimal(df)
         
+        # Nettoyage et tri
         df = self._remove_fake_balances(df)
         df = self._sort_by_page_line(df)
         
-        # NOTE : On ne doit JAMAIS auto-corriger le solde de clôture mathématiquement.
-        # Si une erreur ou un trou survient, l'application (app.py) doit calculer 
-        # l'écart et l'afficher en rouge pour alerter le comptable.
+        # NOUVEAU : Verrouillage chronologique des soldes
+        df = self._force_balance_positions(df)
         
         df = self._post_process_by_bank(df, banque_nom)
 
@@ -164,30 +164,32 @@ class DataCleaner:
 
     def _clean_libelle(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'Libellé' in df.columns:
+            # Nettoyage des espaces
             df['Libellé'] = df['Libellé'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+            
+            # SUPPRESSION DU FILIGRANE UBA ("The zone serial is [ 6].")
+            df['Libellé'] = df['Libellé'].str.replace(r'(?i)The zone serial is\s*\[\s*\d+\s*\]\.?', '', regex=True).str.strip()
+            
+            # Nettoyage des textes répétés par l'IA dans les colonnes serrées
+            df['Libellé'] = df['Libellé'].str.replace(r'(COMM ON DRAFT)\s+\1', r'\1', regex=True)
+            df['Libellé'] = df['Libellé'].str.replace(r'(VAT ON DD CHRG)\s+\1', r'\1', regex=True)
+            
         return df
 
     def _remove_duplicates_minimal(self, df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
             return df
             
-        # 1. Suppression stricte classique
         df = df.drop_duplicates(keep='first').reset_index(drop=True)
         
-        # 2. Nettoyage ciblé pour les doublons d'Overlap (chevauchement)
         to_drop = []
         for i in range(1, len(df)):
             prev = df.iloc[i-1]
             curr = df.iloc[i]
             
-            # Vérification des dates
             same_date = curr.get('Date') == prev.get('Date')
-            
-            # Vérification des montants (en gérant proprement les NaN)
             same_debit = (pd.isna(curr.get('Débit')) and pd.isna(prev.get('Débit'))) or (curr.get('Débit') == prev.get('Débit'))
             same_credit = (pd.isna(curr.get('Crédit')) and pd.isna(prev.get('Crédit'))) or (curr.get('Crédit') == prev.get('Crédit'))
-            
-            # Vérification rigoureuse du solde
             same_solde = pd.notna(curr.get('Solde')) and (curr.get('Solde') == prev.get('Solde'))
             
             if same_date and same_debit and same_credit and same_solde:
@@ -201,7 +203,6 @@ class DataCleaner:
             
         df = df.reset_index(drop=True)
         to_drop = []
-        
         opening_indices = []
         closing_indices = []
         
@@ -243,21 +244,51 @@ class DataCleaner:
             df = df.sort_values(by=sort_cols, kind='mergesort', na_position='first')
         return df.reset_index(drop=True)
 
+    def _force_balance_positions(self, df: pd.DataFrame) -> pd.DataFrame:
+        """ 
+        Force le solde d'ouverture à l'index 0 et le solde de clôture au dernier index.
+        Ceci empêche les soldes imprimés dans l'en-tête d'une page (ex: UBA) 
+        de se mélanger avec la chronologie des transactions.
+        """
+        if df.empty or 'Libellé' not in df.columns:
+            return df
+            
+        lib_lower = df['Libellé'].astype(str).str.lower()
+        
+        is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent', regex=True)
+        is_closing = lib_lower.str.contains(r'cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final', regex=True)
+        
+        # Pour les libellés génériques
+        is_solde_au = lib_lower.str.contains(r'solde\s*au\s*\d', regex=True)
+        mid_point = len(df) / 2
+        
+        mask_opening = is_opening | (is_solde_au & (df.index < mid_point))
+        mask_closing = is_closing | (is_solde_au & (df.index >= mid_point))
+        
+        mask_opening = mask_opening & ~is_closing
+        mask_closing = mask_closing & ~is_opening
+        
+        df_opening = df[mask_opening]
+        df_closing = df[mask_closing]
+        df_trans = df[~(mask_opening | mask_closing)]
+        
+        final_parts = []
+        if not df_opening.empty:
+            final_parts.append(df_opening)
+            
+        final_parts.append(df_trans.sort_index())
+        
+        if not df_closing.empty:
+            final_parts.append(df_closing)
+            
+        return pd.concat(final_parts, ignore_index=True) if final_parts else df
+
     def _post_process_by_bank(self, df: pd.DataFrame, banque_nom: str) -> pd.DataFrame:
         column_mapping = {
-            'Particulars': 'Libellé',
-            'Particularités': 'Libellé',
-            'Désignation': 'Libellé',
-            'Libellé de l\'opération': 'Libellé',
-            'Libelle et Référence': 'Libellé',
-            'Narration': 'Libellé',
-            'Batch/Ref': 'Référence',
-            'Cheq#': 'Référence',
-            'N° Pièce': 'Référence',
-            'VE N°': 'Référence',
-            'CHQ N°': 'Référence',
-            'Pièce N°': 'Référence',
-            'Tran Ref': 'Référence',
+            'Particulars': 'Libellé', 'Particularités': 'Libellé', 'Désignation': 'Libellé',
+            'Libellé de l\'opération': 'Libellé', 'Libelle et Référence': 'Libellé', 'Narration': 'Libellé',
+            'Batch/Ref': 'Référence', 'Cheq#': 'Référence', 'N° Pièce': 'Référence',
+            'VE N°': 'Référence', 'CHQ N°': 'Référence', 'Pièce N°': 'Référence', 'Tran Ref': 'Référence',
         }
         
         for col in df.columns:
@@ -307,15 +338,9 @@ class DataCleaner:
 
     def get_statistics(self, df: pd.DataFrame, banque_nom: str = "Autre banque") -> dict:
         stats = {
-            'total_transactions': 0,
-            'total_credit': 0.0,
-            'total_debit': 0.0,
-            'net': 0.0,
-            'solde_ouverture': None,
-            'solde_cloture': None,
-            'ecart_ouverture_cloture': None,
-            'periode_debut': '',
-            'periode_fin': '',
+            'total_transactions': 0, 'total_credit': 0.0, 'total_debit': 0.0, 'net': 0.0,
+            'solde_ouverture': None, 'solde_cloture': None, 'ecart_ouverture_cloture': None,
+            'periode_debut': '', 'periode_fin': '',
         }
 
         if df.empty:
