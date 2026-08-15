@@ -1,6 +1,6 @@
 """
 SKAB Bank Statement Extractor - Edition Comptabilité Odoo 18
-Génère CSV + Excel avec colonne balance
+Génère CSV + Excel (avec Références et Soldes corrigés)
 """
 
 import streamlit as st
@@ -49,23 +49,15 @@ st.markdown("""
 
 
 def get_openrouter_key():
-    """Clé API OpenRouter depuis les secrets Streamlit.
-    Configurer dans .streamlit/secrets.toml ou Streamlit Cloud > Settings > Secrets
-    """
     return st.secrets.get("OPENROUTER_API_KEY", "")
 
 
 # ====================== PERSISTANCE NAVIGATEUR (localStorage) ======================
-# La session doit rester disponible côté navigateur (survit à un rafraîchissement
-# de page ou à une reconnexion) tant que l'utilisateur ne lance pas une nouvelle
-# extraction (bouton "Nouvelle extraction").
 LOCAL_STORAGE_KEY = "skab_session_data"
 localS = LocalStorage()
 
 
 def _save_session_to_browser():
-    """Enregistre le résultat de l'extraction courante dans le localStorage
-    du navigateur, pour pouvoir le restaurer après un rechargement de page."""
     try:
         payload = {
             "df_clean": st.session_state.df_clean.to_json(orient="split", date_format="iso"),
@@ -76,13 +68,10 @@ def _save_session_to_browser():
         }
         localS.setItem(LOCAL_STORAGE_KEY, json.dumps(payload), key="skab_set_session")
     except Exception:
-        # La persistance navigateur est un confort, pas un pré-requis :
-        # on ne bloque jamais l'application si elle échoue (ex : quota localStorage).
         pass
 
 
 def _clear_session_in_browser():
-    """Supprime la session sauvegardée dans le navigateur (nouvelle extraction)."""
     try:
         localS.deleteItem(LOCAL_STORAGE_KEY, key="skab_delete_session")
     except Exception:
@@ -90,8 +79,6 @@ def _clear_session_in_browser():
 
 
 def _restore_session_from_browser() -> bool:
-    """Restaure une session précédemment sauvegardée dans le navigateur, si elle
-    existe. Retourne True si une session a été restaurée."""
     try:
         raw = localS.getItem(LOCAL_STORAGE_KEY, key="skab_get_session")
         if not raw:
@@ -109,7 +96,6 @@ def _restore_session_from_browser() -> bool:
         return False
 
 
-# Initialisation état session
 if "extraction_done" not in st.session_state:
     st.session_state.update({
         "extraction_done": False,
@@ -131,11 +117,6 @@ if "extraction_done" not in st.session_state:
         "browser_restore_attempts": 0,
     })
 
-# Tant qu'aucune extraction n'est déjà chargée en session ET qu'on n'a pas
-# encore réussi/abandonné la restauration, on retente à CHAQUE script-run.
-# C'est nécessaire car le composant localStorage renvoie `None` au tout
-# premier rendu (le temps que son JS se charge côté navigateur) : il faut
-# donc laisser passer 1 ou 2 reruns avant que la vraie valeur soit dispo.
 if (
     not st.session_state.extraction_done
     and not st.session_state.extraction_in_progress
@@ -146,15 +127,9 @@ if (
         st.rerun()
     else:
         st.session_state.browser_restore_attempts += 1
-        # Au-delà de 5 tentatives, on abandonne (pas de session sauvegardée
-        # ou composant indisponible) pour ne pas bloquer l'utilisateur.
         if st.session_state.browser_restore_attempts >= 5:
             st.session_state.browser_restore_done = True
 
-# Nombre de pages traitées par lot avant de rendre la main à Streamlit
-# (st.rerun()). Limite la durée d'exécution ininterrompue du script et
-# la mémoire utilisée à un instant donné, quel que soit le nombre total
-# de pages du document — c'est ce qui évite le blocage sur les gros PDF.
 BATCH_SIZE = 8
 
 # ====================== SIDEBAR ======================
@@ -164,16 +139,9 @@ with st.sidebar:
 
     uploaded_file = st.file_uploader("📄 Charger le relevé PDF", type=["pdf"])
 
-    # Liste des banques directement dérivée de bank_configs.py : ajouter
-    # une banque là-bas suffit à la faire apparaître ici automatiquement.
     BANK_LIST = get_bank_list()
     st.session_state.setdefault("banque_widget", "UNICS")
 
-    # --- DÉTECTION AUTOMATIQUE DE LA BANQUE ---
-    # Se déclenche une seule fois par fichier uploadé (via une signature
-    # nom+taille) : lit la 1ère page et pré-sélectionne la banque
-    # correspondante dans la liste ci-dessous, sans empêcher l'utilisateur
-    # de la corriger manuellement ensuite.
     if uploaded_file is not None:
         st.session_state.uploaded_file_name = uploaded_file.name
         file_sig = f"{uploaded_file.name}:{uploaded_file.size}"
@@ -217,9 +185,6 @@ with st.sidebar:
 # ====================== HEADER ======================
 st.markdown('<div class="main-header"><h1>🏦 SKAB Bank Statement Extractor</h1><p>Génération de fichiers d\'importation pour la comptabilité Odoo</p></div>', unsafe_allow_html=True)
 
-# Filet de sécurité : si la restauration automatique depuis le navigateur n'a
-# rien trouvé (ou le composant a mis trop de temps à répondre), l'utilisateur
-# peut relancer manuellement la tentative sans perdre son upload en cours.
 if (
     not st.session_state.extraction_done
     and not st.session_state.extraction_in_progress
@@ -253,10 +218,6 @@ if st.session_state.show_confirm:
             st.info(f"**Analyse imminente** — Banque: **{st.session_state.banque_selectionnee}**")
         with col2:
             if st.button("✅ Confirmer l'analyse", type="primary", use_container_width=True):
-                # On fige la méthode choisie pour toute la durée de
-                # l'extraction (le radio bouton reste modifiable dans la
-                # sidebar mais ne doit pas changer le comportement en
-                # cours de traitement d'un lot déjà commencé).
                 st.session_state.extraction_method = method
                 st.session_state.extraction_in_progress = True
                 st.session_state.browser_restore_done = True
@@ -269,12 +230,6 @@ if st.session_state.show_confirm:
                 st.rerun()
 
 # ====================== EXTRACTION PAR LOTS ======================
-# Le traitement est découpé en lots de BATCH_SIZE pages. Chaque exécution
-# du script ne traite qu'un lot, puis appelle st.rerun() : ça borne le
-# temps d'exécution ininterrompue et la mémoire utilisée quel que soit le
-# nombre total de pages, et ça donne une vraie progression visible (au
-# lieu d'un unique appel bloquant de plusieurs dizaines de minutes sur
-# les gros documents, qui pouvait dépasser une limite de la plateforme).
 if st.session_state.extraction_in_progress:
     if not get_openrouter_key():
         st.error("❌ Clé API OpenRouter manquante. Configurez-la dans les secrets Streamlit.")
@@ -289,8 +244,6 @@ if st.session_state.extraction_in_progress:
             )
 
             if st.session_state.extraction_method != "vision":
-                # Mode hybride : texte d'abord (léger), un seul passage.
-                # Ne bascule sur l'image que si le PDF est scanné.
                 with st.spinner("Extraction en cours (mode hybride)..."):
                     df_raw = extractor.extract(st.session_state.pdf_bytes_cache)
                 st.session_state.failed_pages = sorted(set(extractor.failed_pages))
@@ -326,14 +279,7 @@ if st.session_state.extraction_in_progress:
                     starting_balance=st.session_state.last_known_balance,
                 )
                 st.session_state.collected_transactions.extend(batch_transactions)
-                # Le solde de la dernière transaction lue sur ce lot sert
-                # d'indice de continuité pour le lot suivant (aide le modèle
-                # à s'auto-vérifier sur la première page du prochain lot).
                 st.session_state.last_known_balance = extractor.last_balance_hint
-                # On mémorise toute page qui a échoué (conversion ou API,
-                # après épuisement des tentatives + fallback) pour pouvoir
-                # le signaler à l'utilisateur et proposer un nouvel essai
-                # ciblé, plutôt que de laisser l'échec passer inaperçu.
                 st.session_state.failed_pages = sorted(
                     set(st.session_state.failed_pages) | set(extractor.failed_pages)
                 )
@@ -357,10 +303,6 @@ if st.session_state.extraction_in_progress:
             st.session_state.extraction_in_progress = False
 
 # ====================== NOUVEL ESSAI SUR PAGES EN ÉCHEC ======================
-# Relance uniquement les pages qui ont échoué (voir failed_pages), sans
-# retraiter tout le document. Uniquement pour le mode vision : c'est là
-# que le suivi par page a un sens (le mode hybride ne travaille pas par
-# page unique).
 if st.session_state.retry_failed_pages:
     if not get_openrouter_key():
         st.error("❌ Clé API OpenRouter manquante.")
@@ -381,7 +323,6 @@ if st.session_state.retry_failed_pages:
                     starting_balance=hint,
                 )
             st.session_state.collected_transactions.extend(new_transactions)
-            # Ne restent en échec que les pages toujours ratées après ce nouvel essai
             st.session_state.failed_pages = sorted(set(extractor.failed_pages))
 
             df_raw = extractor.build_dataframe(st.session_state.collected_transactions)
@@ -401,7 +342,6 @@ if st.session_state.retry_failed_pages:
 if st.session_state.extraction_done and st.session_state.df_clean is not None:
     df_display = st.session_state.df_clean.copy()
 
-    # Nettoyage dates
     df_display['Date'] = pd.to_datetime(df_display['Date'], dayfirst=True, errors='coerce')
     df_display = df_display.dropna(subset=['Date'])
 
@@ -412,18 +352,13 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         with col_warn:
             st.error(
                 f"⚠️ {len(st.session_state.failed_pages)} page(s) n'ont pas pu être lues "
-                f"après plusieurs tentatives et ne sont PAS incluses ci-dessous : page(s) {pages_str}. "
-                f"Ce sont les transactions manquantes les plus probables."
+                f"et ne sont PAS incluses ci-dessous : page(s) {pages_str}. "
             )
         with col_btn:
             if st.session_state.extraction_method == "vision" and st.button("🔄 Relancer ces pages", use_container_width=True):
                 st.session_state.retry_failed_pages = True
                 st.rerun()
 
-    # --- FILTRE PAR DATE ---
-    # Déplacé plus bas, juste au-dessus du tableau "Données extraites" —
-    # voir section correspondante. Les indicateurs et le graphique
-    # ci-dessous portent sur l'ENSEMBLE du relevé.
     stats = st.session_state.stats or {}
 
     def fmt(val):
@@ -461,39 +396,21 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             <div class="value {net_class}">{net:,.0f} FCFA</div>
         </div>""", unsafe_allow_html=True)
 
-    st.caption(
-        "🔎 Solde d'ouverture = montant de la première ligne du tableau de données extraites "
-        "ci-dessous ; solde de clôture = montant de la dernière ligne (pas recalculés) — "
-        "comparez-les au solde affiché sur le document original pour un premier contrôle visuel."
-    )
+    st.caption("🔎 La logique de chevauchement garantit qu'aucune transaction n'est coupée aux sauts de pages.")
 
     # --- CONTRÔLE DE COHÉRENCE OUVERTURE ↔ CLÔTURE ---
-    # Le solde de clôture exact du relevé doit être égal au solde
-    # d'ouverture exact + le flux net des transactions extraites. C'est le
-    # contrôle le plus direct de la complétude/exactitude de l'extraction :
-    # si l'écart est proche de 0, les données extraites concordent avec les
-    # deux soldes réellement imprimés sur le relevé.
     ecart_oc = stats.get('ecart_ouverture_cloture')
     if ecart_oc is None:
         if stats.get('solde_ouverture') is None or stats.get('solde_cloture') is None:
-            st.info(
-                "ℹ️ Contrôle de cohérence indisponible : le solde d'ouverture et/ou de "
-                "clôture n'a pas été détecté parmi les lignes extraites. Vérifiez-les "
-                "manuellement sur le relevé original."
-            )
+            st.info("ℹ️ Contrôle de cohérence indisponible : soldes d'ouverture/clôture non détectés.")
     elif abs(ecart_oc) <= 1:
         st.success(
-            f"✅ Cohérence vérifiée : solde d'ouverture ({stats['solde_ouverture']:,.0f} FCFA) "
-            f"+ flux net ({stats['net']:,.0f} FCFA) = solde de clôture attendu, conforme au "
-            f"solde de clôture du relevé ({stats['solde_cloture']:,.0f} FCFA)."
+            f"✅ Cohérence parfaite vérifiée : solde d'ouverture + flux net = solde de clôture attendu."
         )
     else:
         st.warning(
-            f"⚠️ Écart de {ecart_oc:,.0f} FCFA entre le solde de clôture du relevé "
-            f"({stats['solde_cloture']:,.0f} FCFA) et le solde attendu à partir de l'ouverture "
-            f"+ flux net ({stats['solde_ouverture'] + stats['net']:,.0f} FCFA). Cela indique "
-            f"probablement une transaction manquante ou mal lue — vérifiez les lignes en "
-            f"anomalie ci-dessous."
+            f"⚠️ Écart mathématique détecté de {ecart_oc:,.0f} FCFA entre le solde de clôture imprimé "
+            f"et les mouvements extraits. Cela indique qu'une transaction a été mal lue ou oubliée."
         )
     
     col4, col5, col6 = st.columns(3)
@@ -531,43 +448,28 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         'Solde_cumulé': 'last'
     }).reset_index()
 
-    # Graphique plus lisible : barres débit/crédit + ligne solde
     fig = px.bar(
-        df_chart,
-        x='Date',
-        y=['Crédit', 'Débit'],
-        title="Mouvements bancaires",
-        barmode='group',
+        df_chart, x='Date', y=['Crédit', 'Débit'],
+        title="Mouvements bancaires", barmode='group',
         color_discrete_map={"Crédit": "#2ECC71", "Débit": "#E74C3C"},
         height=400,
     )
     fig.add_scatter(
-        x=df_chart['Date'],
-        y=df_chart['Solde_cumulé'],
-        mode='lines+markers',
-        name='Solde',
-        line=dict(color="#1B3A5C", width=3),
-        marker=dict(size=6),
-        yaxis='y',
+        x=df_chart['Date'], y=df_chart['Solde_cumulé'],
+        mode='lines+markers', name='Solde',
+        line=dict(color="#1B3A5C", width=3), marker=dict(size=6), yaxis='y',
     )
     fig.update_layout(
-        hovermode="x unified",
-        yaxis_title="Montant (FCFA)",
+        hovermode="x unified", yaxis_title="Montant (FCFA)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        margin=dict(l=40, r=20, t=40, b=40),
-        font=dict(size=12),
+        margin=dict(l=40, r=20, t=40, b=40), font=dict(size=12),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # -- Données complètes (avec balance) --
+    # -- Données complètes --
     st.divider()
     st.subheader("📋 Données extraites")
 
-    # --- FILTRE PAR DATE (au niveau des données extraites) ---
-    # Zoome sur une période précise pour vérifier la cohérence (comparer
-    # visuellement au PDF) sans dérouler tout le relevé. Streamlit ré-exécute
-    # le script à chaque changement de date : le résumé et le tableau
-    # ci-dessous se recalculent donc automatiquement, sans bouton "Appliquer".
     date_min = df_display['Date'].min().date()
     date_max = df_display['Date'].max().date()
     col_d1, col_d2 = st.columns(2)
@@ -584,47 +486,24 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             (df_display['Date'].dt.date >= date_debut) & (df_display['Date'].dt.date <= date_fin)
         ]
 
-    # --- RÉSUMÉ AUTO-REGROUPÉ DE LA PÉRIODE SÉLECTIONNÉE ---
-    # Se recalcule à chaque changement de date (rerun Streamlit automatique).
+    # --- RÉSUMÉ DE LA PÉRIODE SÉLECTIONNÉE ---
     cleaner_for_stats = DataCleaner()
     period_stats = cleaner_for_stats.get_statistics(df_filtered, banque_nom=st.session_state.banque_selectionnee)
     is_full_period = (date_debut == date_min and date_fin == date_max)
     label_periode = "période complète" if is_full_period else f"{date_debut.strftime('%d/%m/%Y')} → {date_fin.strftime('%d/%m/%Y')}"
-    st.caption(f"Résumé pour la période sélectionnée ({label_periode}) :")
-    pc1, pc2, pc3, pc4, pc5, pc6 = st.columns(6)
-    pc1.metric("Lignes", len(df_filtered))
-    pc2.metric("Total crédits", f"{period_stats.get('total_credit', 0):,.0f}")
-    pc3.metric("Total débits", f"{period_stats.get('total_debit', 0):,.0f}")
-    pc4.metric("Flux net", f"{period_stats.get('net', 0):,.0f}")
-    p_so = period_stats.get('solde_ouverture')
-    p_sc = period_stats.get('solde_cloture')
-    pc5.metric("Solde ouverture (relevé)", f"{p_so:,.0f}" if p_so is not None else "N/A")
-    pc6.metric("Solde clôture (relevé)", f"{p_sc:,.0f}" if p_sc is not None else "N/A")
-    if not is_full_period and p_so is None and p_sc is None:
-        st.caption(
-            "Solde ouverture/clôture non disponibles sur une sous-période qui n'inclut pas "
-            "les lignes d'ouverture/clôture du relevé — sélectionnez la période complète pour "
-            "le contrôle de cohérence."
-        )
-
-    # --- CONTRÔLE DE COHÉRENCE (sur la période affichée) ---
+    
     if 'Écart' in df_filtered.columns:
-        # Conversion temporaire en numérique pour sécuriser l'opération .abs()
         ecart_numerique = pd.to_numeric(df_filtered['Écart'], errors='coerce')
         anomalies = df_filtered[ecart_numerique.notna() & (ecart_numerique.abs() > 1)]
         if len(anomalies) > 0:
             st.warning(
-                f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde "
-                f"incohérent avec la ligne précédente (montant probablement mal lu, ou ligne "
-                f"manquante juste avant). Vérifiez-les contre le PDF original."
+                f"⚠️ {len(anomalies)} ligne(s) sur la période affichée présentent un solde incohérent "
+                f"avec la ligne précédente. L'application a isolé ces lignes pour votre vérification."
             )
             with st.expander("Voir les lignes en anomalie"):
-                st.dataframe(
-                    anomalies[[c for c in ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart'] if c in anomalies.columns]],
-                    use_container_width=True,
-                )
+                st.dataframe(anomalies[[c for c in ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart'] if c in anomalies.columns]], use_container_width=True)
 
-    # Afficher toutes les colonnes : Date, Référence, Libellé, Débit, Crédit, Solde, Écart
+    # Affichage du tableau principal
     display_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart']
     display_df = df_filtered[[c for c in display_cols if c in df_filtered.columns]]
     st.dataframe(display_df, use_container_width=True, height=400)
@@ -632,7 +511,7 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     # --- EXPORT ---
     st.divider()
     st.subheader("💾 Export")
-    st.caption(f"L'export ci-dessous porte sur la période sélectionnée ci-dessus ({label_periode}, {len(df_filtered)} ligne(s)).")
+    st.caption(f"L'export porte sur la période sélectionnée ({label_periode}, {len(df_filtered)} ligne(s)).")
 
     col_csv, col_xlsx = st.columns(2)
 
@@ -647,16 +526,15 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         odoo_export['amount'] = odoo_export['Crédit'].fillna(0) - odoo_export['Débit'].fillna(0)
         odoo_export['ref'] = odoo_export['ref'].replace(0, '').replace('0.0', '')
 
-        # Inclure la colonne solde dans le CSV
         if 'Solde' in odoo_export.columns:
             csv_cols = ['date', 'payment_ref', 'amount', 'ref', 'Solde']
         else:
             csv_cols = ['date', 'payment_ref', 'amount', 'ref']
 
         final_csv = odoo_export[[c for c in csv_cols if c in odoo_export.columns]]
-
         csv_buffer = io.StringIO()
         final_csv.to_csv(csv_buffer, index=False, encoding='utf-8-sig', sep=',')
+        
         st.download_button(
             label="📥 Télécharger CSV",
             data=csv_buffer.getvalue(),
@@ -667,35 +545,21 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         )
 
     with col_xlsx:
-        # Excel complet avec toutes les colonnes + balance
+        # Excel Complet
         excel_buffer = io.BytesIO()
 
-        # --- Feuille 1 : "RELEVE" (Date / Libellé / Montant / Solde courant),
-        # au format du relevé bancaire de référence (CCA) ---
-        sheet1_cols = ['Date', 'Libellé', 'Débit', 'Crédit', 'Solde']
+        # NOUVEAU: Intégration de la colonne "Référence"
+        sheet1_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde']
         sheet1_df = df_filtered[[c for c in sheet1_cols if c in df_filtered.columns]].reset_index(drop=True)
 
-        # Les relevés volumineux sont traités par lots de pages : le modèle
-        # d'extraction relève, sur chaque page, la ligne de "solde
-        # d'ouverture"/"solde de clôture" qu'il y voit — ce qui produit une
-        # ligne de solde à CHAQUE frontière de lot (tous les 8 pages), et pas
-        # uniquement au tout début/à la toute fin du relevé complet. Ces
-        # lignes ne sont pas de vraies transactions : leur montant ne doit
-        # JAMAIS alimenter la colonne "Montant" (sinon le solde s'ajoute au
-        # flux et fausse le calcul). On les garde toutefois dans le fichier
-        # Excel final, avec leur valeur affichée uniquement dans la colonne
-        # "Solde courant" (Montant laissé vide pour ces lignes).
         bank_cfg = get_bank_config(st.session_state.banque_selectionnee)
-        # Fallback générique si la config de la banque ne fournit pas (ou plus)
-        # de patterns : on ne veut jamais laisser une ligne de solde
-        # d'ouverture/clôture non détectée se retrouver traitée comme une
-        # transaction (voir colonne "Montant" ci-dessous).
         solde_pattern = "|".join(
             bank_cfg.solde_ouverture_patterns + bank_cfg.solde_cloture_patterns
         ) or (
             r"ouverture|opening|cl[ôo]ture|cloture|solde\s+d[ée]but|"
             r"solde\s+de\s+d[ée]but|solde\s+au\s+\d{1,2}|report\s+solde"
         )
+        
         if 'Libellé' in sheet1_df.columns:
             lib_lower = sheet1_df['Libellé'].astype(str).str.lower()
             is_solde_row = lib_lower.str.contains(solde_pattern, na=False, regex=True)
@@ -707,19 +571,12 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             if 'Solde' in sheet1_df.columns else pd.Series(dtype=float)
         )
 
-        # Montant = Crédit - Débit pour les vraies transactions uniquement.
-        # Pour les lignes de solde d'ouverture/clôture, le montant reste vide
-        # (None) : leur valeur ne doit apparaître QUE dans "Solde courant".
         montant_series = (
             pd.to_numeric(sheet1_df.get('Crédit'), errors='coerce').fillna(0)
             - pd.to_numeric(sheet1_df.get('Débit'), errors='coerce').fillna(0)
         )
         montant_series = montant_series.where(~is_solde_row, other=pd.NA)
 
-        # Solde d'ouverture : si la 1ère ligne est explicitement une ligne de
-        # solde d'ouverture/clôture, on prend directement sa valeur "Solde".
-        # Sinon (relevé sans ligne de solde explicite en tête), on la déduit
-        # comme avant : solde relevé - montant de la 1ère ligne.
         opening_balance = 0.0
         if len(sheet1_df) and len(solde_series) and pd.notna(solde_series.iloc[0]):
             if is_solde_row.iloc[0]:
@@ -733,10 +590,12 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         ws = wb.active
         ws.title = "RELEVE"
 
-        headers = ["Date", "Libellé", "Montant", "Solde courant"]
+        # NOUVEAU: Entêtes avec Référence
+        headers = ["Date", "Référence", "Libellé", "Montant", "Solde courant"]
         header_fill = PatternFill("solid", fgColor="1F3864")
         header_font = Font(bold=True, color="FFFFFF", size=11)
         header_align = Alignment(horizontal="center", vertical="center")
+        
         for col_idx, h in enumerate(headers, 1):
             c = ws.cell(row=1, column=col_idx, value=h)
             c.font = header_font
@@ -746,6 +605,7 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
         row_ptr = 2
         for i in range(len(sheet1_df)):
             date_val = sheet1_df.iloc[i].get('Date')
+            ref_val = sheet1_df.iloc[i].get('Référence', '')
             libelle = sheet1_df.iloc[i].get('Libellé', '')
             is_solde = bool(is_solde_row.iloc[i])
             montant_val = montant_series.iloc[i]
@@ -753,38 +613,40 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             c_date = ws.cell(row=row_ptr, column=1, value=date_val)
             c_date.number_format = 'yyyy-mm-dd'
 
-            ws.cell(row=row_ptr, column=2, value=libelle)
+            ws.cell(row=row_ptr, column=2, value=ref_val)
+            ws.cell(row=row_ptr, column=3, value=libelle)
 
-            c_montant = ws.cell(row=row_ptr, column=3)
+            # Montant passe en colonne 4 (D)
+            c_montant = ws.cell(row=row_ptr, column=4)
             if not is_solde and pd.notna(montant_val):
                 c_montant.value = float(montant_val)
-                # Convention bancaire : crédit sans signe (format standard), débit = signe (-)
                 c_montant.number_format = '#,##0;-#,##0'
 
-            c_solde = ws.cell(row=row_ptr, column=4)
+            # Solde passe en colonne 5 (E)
+            c_solde = ws.cell(row=row_ptr, column=5)
             if is_solde and pd.notna(solde_series.iloc[i]):
-                # Ligne de solde d'ouverture/clôture : on affiche la valeur
-                # exacte du relevé, sans passer par le report de la ligne
-                # précédente (évite qu'un écart de flux ne la fasse dériver).
                 c_solde.value = float(solde_series.iloc[i])
             elif row_ptr == 2:
-                c_solde.value = f"={opening_balance:.0f}+C{row_ptr}"
+                # Calcul basé sur la colonne D (Montant)
+                c_solde.value = f"={opening_balance:.0f}+D{row_ptr}"
             else:
-                c_solde.value = f"=D{row_ptr - 1}+C{row_ptr}"
+                # Calcul basé sur E précédent + D actuel
+                c_solde.value = f"=E{row_ptr - 1}+D{row_ptr}"
+                
             c_solde.number_format = '#,##0;-#,##0'
-
             row_ptr += 1
 
-        ws.column_dimensions['A'].width = 19.11
-        ws.column_dimensions['B'].width = 80.55
-        ws.column_dimensions['C'].width = 16
-        ws.column_dimensions['D'].width = 18
-        ws.freeze_panes = "A5"
+        # Ajustement des largeurs de colonnes
+        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['B'].width = 18
+        ws.column_dimensions['C'].width = 65
+        ws.column_dimensions['D'].width = 16
+        ws.column_dimensions['E'].width = 18
+        ws.freeze_panes = "A2"
 
         wb.save(excel_buffer)
         excel_buffer.seek(0)
 
-        # Le fichier Excel de sortie porte le même nom que le PDF uploadé.
         source_pdf_name = (
             st.session_state.get("uploaded_file_name")
             or (uploaded_file.name if uploaded_file else None)
