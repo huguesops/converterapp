@@ -1,6 +1,7 @@
 """
-extractor_openrouter.py - Version 2.3
-Extraction universelle avec récupération intelligente des soldes hors-tableau (Afriland)
+extractor_openrouter.py - Version 2.4 (Mise à jour)
+Extraction universelle avec récupération intelligente des soldes hors-tableau,
+gestion avancée des chevauchements (overlap) et protection anti-décalage.
 """
 
 import base64
@@ -281,19 +282,15 @@ Le solde à la fin de la page précédente était de {previous_balance:,.2f}.
 
         prompt = f"""Tu es un expert comptable très rigoureux spécialisé dans les relevés bancaires camerounais.
 
-**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles, ainsi que les soldes d'ouverture et de clôture du compte.
+**MISSION CRITIQUE** : Tu dois extraire **ABSOLUMENT TOUTES** les lignes de transaction visibles. Si le document comporte 50 lignes, ton JSON DOIT comporter 50 lignes.
 
 **RÈGLES STRICTES ET IMPÉRATIVES** :
 1. **SOLDES D'OUVERTURE ET DE CLÔTURE (CRITIQUE)** : 
-   - Tu DOIS IMPÉRATIVEMENT trouver et extraire le solde initial du relevé (ex: "Solde de début", "Solde à l'ouverture", "Solde au...") et le solde final ("Solde de clôture", "Nouveau solde", "Solde au...").
-   - Si ces soldes sont écrits en dehors du tableau principal (ex: un petit texte juste au-dessus ou en dessous du tableau), insère-les quand même comme la PREMIÈRE (pour l'ouverture) et la DERNIÈRE (pour la clôture) transaction de ton JSON.
-   - Mets leur montant UNIQUEMENT dans le champ "solde" du JSON (laisse "debit" et "credit" à null). Même si le document imprime le chiffre du solde final dans la colonne Crédit ou Débit, tu le mets OBLIGATOIREMENT dans le champ "solde" de ton JSON.
-   - (Exception : Si la toute première ligne *à l'intérieur* du tableau est déjà le solde d'ouverture, utilise cette ligne et ignore le résumé extérieur pour ne pas faire de doublons).
-2. **Lignes à IGNORER** : Tu DOIS IGNORER et ne pas extraire les lignes de sous-totaux (ex: "Total", "Total des mouvements", "Total des débits", "A reporter"). N'extrais QUE les vraies transactions et les Soldes (ouverture/clôture).
-3. **Ordre et Numérotation** : Tu dois OBLIGATOIREMENT assigner un `numero_ligne` séquentiel (1, 2, 3...) à chaque transaction extraite.
-4. **Chronologie visuelle** : L'ordre des transactions dans ton JSON DOIT correspondre EXACTEMENT à la lecture de haut en bas du document. Ne mélange jamais les lignes.
-5. **Exhaustivité** : Ne JAMAIS sauter une vraie ligne de transaction. Si une description s'étale sur plusieurs lignes, fusionne-la.
-6. **Format des montants** : Retourne uniquement des chiffres sans séparateur de milliers (ex: 308000 au lieu de 308,000).
+   - Tu DOIS IMPÉRATIVEMENT trouver et extraire le solde initial et le solde final. Mets leur montant UNIQUEMENT dans le champ "solde" du JSON (laisse "debit" et "credit" à null).
+2. **Lignes à IGNORER** : Ignore les sous-totaux (ex: "Total", "A reporter"). N'extrais QUE les vraies transactions.
+3. **Ordre et Numérotation** : Assigne un `numero_ligne` séquentiel (1, 2, 3...) à chaque transaction.
+4. **DANGER D'INVERSION DÉBIT/CRÉDIT (TRÈS IMPORTANT)** : Fais très attention à l'alignement des colonnes. Si l'espace de la colonne Débit est vide sur le papier, ALORS met impérativement `null` dans le champ "debit", et mets le montant dans "credit". Ne décale pas les chiffres vers la gauche. Un retrait/frais est un Débit, un versement/virement reçu est un Crédit. Révise mentalement la logique mathématique (Solde Précédent + Crédit - Débit = Nouveau Solde).
+5. **Exhaustivité** : Ne JAMAIS sauter une ligne. Ne FAIS PAS DE RÉSUMÉ.
 
 **Structure du relevé {c.nom}** :
 {c.structure_description}
@@ -487,29 +484,45 @@ Retourne **uniquement** le JSON suivant, sans aucun commentaire :
         return self._extract_vision(pdf_bytes)
 
     def _extract_text(self, text_content: str) -> pd.DataFrame:
-        prompt = self._build_prompt(is_vision=False)
-        max_chars = 30000
-        chunks = [text_content[i:i+max_chars] for i in range(0, len(text_content), max_chars)]
+        # 1. RÉDUCTION ET CHEVAUCHEMENT (OVERLAP)
+        max_chars = 8000
+        overlap = 500
+        
+        chunks = []
+        i = 0
+        while i < len(text_content):
+            chunk = text_content[i:i + max_chars]
+            chunks.append(chunk)
+            if i + max_chars >= len(text_content):
+                break
+            # Reculer pour l'overlap
+            i += (max_chars - overlap)
 
         all_transactions = []
-        for i, chunk in enumerate(chunks):
-            prompt_chunk = self._build_prompt(is_vision=False) + f"\n\n**Texte (partie {i+1}/{len(chunks)}) :**\n{chunk}"
+        for j, chunk in enumerate(chunks):
+            # 2. INSTRUCTION ANTI-PARESSE
+            prompt_chunk = self._build_prompt(is_vision=False) + (
+                f"\n\n**Texte (partie {j+1}/{len(chunks)}) :**\n"
+                "RAPPEL CRITIQUE : N'oublie AUCUNE LIGNE. Si tu atteins ta limite de tokens, continue "
+                "simplement de générer la suite du tableau sans résumer.\n"
+                f"{chunk}"
+            )
 
             raw = None
             for attempt in range(1, 4):
-                raw = self._call_openrouter_text(chunk, prompt_chunk, i+1)
+                raw = self._call_openrouter_text(chunk, prompt_chunk, j+1)
                 if raw and len(raw) > 50:
                     break
                 time.sleep(2)
 
             if not raw:
-                raw = self._try_fallback(page_text=chunk, prompt=prompt_chunk, page_num=i+1)
+                raw = self._try_fallback(page_text=chunk, prompt=prompt_chunk, page_num=j+1)
 
             if raw:
                 transactions = self._parse_response(raw)
                 if transactions:
                     transactions = sorted(transactions, key=lambda x: x.get("numero_ligne", 0))
-                    for t in transactions: t['page_num'] = i + 1
+                    for t in transactions: t['page_num'] = j + 1
                     all_transactions.extend(transactions)
 
         return self._build_dataframe(all_transactions)
