@@ -1,7 +1,7 @@
 """
-cleaner.py - Version 6.2 (Mise à jour Finale)
-Nettoyage des données, élimination des filigranes PDF (ex: UBA) 
-et verrouillage chronologique absolu des soldes d'ouverture/clôture.
+cleaner.py - Version 6.3
+Nettoyage des données, élimination des filigranes, suppression des hallucinations 
+de l'IA (SOLDE INITIAL CALCULE) et verrouillage chronologique.
 """
 
 import pandas as pd
@@ -24,6 +24,9 @@ class DataCleaner:
         df = self._merge_libelles_minimal(df)
         df = self._clean_libelle(df)
         
+        # SUPPRESSION des hallucinations de l'IA (le fameux faux solde)
+        df = self._remove_ai_hallucinations(df)
+        
         # Déduplication intelligente pour gérer les overlaps d'OpenRouter
         df = self._remove_duplicates_minimal(df)
         
@@ -31,12 +34,23 @@ class DataCleaner:
         df = self._remove_fake_balances(df)
         df = self._sort_by_page_line(df)
         
-        # NOUVEAU : Verrouillage chronologique des soldes
+        # Verrouillage chronologique des vrais soldes
         df = self._force_balance_positions(df)
         
         df = self._post_process_by_bank(df, banque_nom)
 
         return df.reset_index(drop=True)
+
+    def _remove_ai_hallucinations(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Supprime les fausses lignes de solde inventées par l'IA lors du traitement par lots.
+        """
+        if df.empty or 'Libellé' not in df.columns:
+            return df
+            
+        # Filtre toutes les variantes de "Solde initial (calcule)"
+        mask = df['Libellé'].astype(str).str.lower().str.contains(r'solde\s*initial\s*\(?calcul[eé]\)?', regex=True)
+        return df[~mask].reset_index(drop=True)
 
     def _clean_dates(self, df: pd.DataFrame) -> pd.DataFrame:
         for col in ['Date', 'Date_Valeur']:
@@ -164,16 +178,10 @@ class DataCleaner:
 
     def _clean_libelle(self, df: pd.DataFrame) -> pd.DataFrame:
         if 'Libellé' in df.columns:
-            # Nettoyage des espaces
             df['Libellé'] = df['Libellé'].astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
-            
-            # SUPPRESSION DU FILIGRANE UBA ("The zone serial is [ 6].")
             df['Libellé'] = df['Libellé'].str.replace(r'(?i)The zone serial is\s*\[\s*\d+\s*\]\.?', '', regex=True).str.strip()
-            
-            # Nettoyage des textes répétés par l'IA dans les colonnes serrées
             df['Libellé'] = df['Libellé'].str.replace(r'(COMM ON DRAFT)\s+\1', r'\1', regex=True)
             df['Libellé'] = df['Libellé'].str.replace(r'(VAT ON DD CHRG)\s+\1', r'\1', regex=True)
-            
         return df
 
     def _remove_duplicates_minimal(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -245,11 +253,6 @@ class DataCleaner:
         return df.reset_index(drop=True)
 
     def _force_balance_positions(self, df: pd.DataFrame) -> pd.DataFrame:
-        """ 
-        Force le solde d'ouverture à l'index 0 et le solde de clôture au dernier index.
-        Ceci empêche les soldes imprimés dans l'en-tête d'une page (ex: UBA) 
-        de se mélanger avec la chronologie des transactions.
-        """
         if df.empty or 'Libellé' not in df.columns:
             return df
             
@@ -258,7 +261,6 @@ class DataCleaner:
         is_opening = lib_lower.str.contains(r'ouverture|opening|solde\s*(au|de)\s*d[ée]but|report|solde\s*ant[ée]rieur|solde\s*pr[ée]c[ée]dent', regex=True)
         is_closing = lib_lower.str.contains(r'cl[ôo]ture|cloture|balance\s*final|nouveau\s*solde|solde\s*final', regex=True)
         
-        # Pour les libellés génériques
         is_solde_au = lib_lower.str.contains(r'solde\s*au\s*\d', regex=True)
         mid_point = len(df) / 2
         
