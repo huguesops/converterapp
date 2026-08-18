@@ -28,7 +28,7 @@ from bank_configs import get_bank_config, get_bank_list, BankConfig
 # ====================== CONFIGURATION OPENROUTER ======================
 
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
-DEFAULT_MODEL = "google/gemini-3.7-flash"
+DEFAULT_MODEL = "google/gemini-3.7-flash:batch"
 
 DEFAULT_FALLBACK_MODELS = [
     "qwen/qwen3-vl-235b-a22b-instruct",
