@@ -1,6 +1,6 @@
 """
 SKAB Bank Statement Extractor - Edition Comptabilité Odoo 18
-Génère CSV + Excel (avec Diagnostic Intelligent embarqué et cellules stylisées)
+Génère CSV + Excel (Avec Triangulation d'Audit et Persistance df_raw)
 """
 
 import streamlit as st
@@ -42,7 +42,7 @@ st.markdown("""
 def get_openrouter_key():
     return st.secrets.get("OPENROUTER_API_KEY", "")
 
-# ====================== PERSISTANCE NAVIGATEUR (localStorage) ======================
+# ====================== PERSISTANCE NAVIGATEUR ======================
 LOCAL_STORAGE_KEY = "skab_session_data"
 localS = LocalStorage()
 
@@ -50,6 +50,8 @@ def _save_session_to_browser():
     try:
         payload = {
             "df_clean": st.session_state.df_clean.to_json(orient="split", date_format="iso"),
+            # Sauvegarde du fichier brut pour la triangulation
+            "df_raw": st.session_state.df_raw.to_json(orient="split", date_format="iso") if st.session_state.get("df_raw") is not None else None,
             "stats": st.session_state.stats,
             "banque_selectionnee": st.session_state.banque_selectionnee,
             "uploaded_file_name": st.session_state.get("uploaded_file_name"),
@@ -67,8 +69,9 @@ def _restore_session_from_browser() -> bool:
         raw = localS.getItem(LOCAL_STORAGE_KEY, key="skab_get_session")
         if not raw: return False
         payload = json.loads(raw) if isinstance(raw, str) else raw
-        df_restored = pd.read_json(io.StringIO(payload["df_clean"]), orient="split")
-        st.session_state.df_clean = df_restored
+        
+        st.session_state.df_clean = pd.read_json(io.StringIO(payload["df_clean"]), orient="split")
+        st.session_state.df_raw = pd.read_json(io.StringIO(payload["df_raw"]), orient="split") if payload.get("df_raw") else None
         st.session_state.stats = payload.get("stats")
         st.session_state.banque_selectionnee = payload.get("banque_selectionnee", "UNICS")
         st.session_state.uploaded_file_name = payload.get("uploaded_file_name")
@@ -79,7 +82,7 @@ def _restore_session_from_browser() -> bool:
 
 if "extraction_done" not in st.session_state:
     st.session_state.update({
-        "extraction_done": False, "show_confirm": False, "df_clean": None, "stats": None,
+        "extraction_done": False, "show_confirm": False, "df_clean": None, "df_raw": None, "stats": None,
         "banque_selectionnee": "UNICS", "pdf_bytes_cache": None, "extraction_in_progress": False,
         "total_pages": None, "current_page": 1, "collected_transactions": [], "extraction_method": "vision",
         "failed_pages": [], "retry_failed_pages": False, "last_known_balance": None,
@@ -182,9 +185,14 @@ if st.session_state.extraction_in_progress:
                 with st.spinner("Extraction en cours (mode hybride)..."):
                     df_raw = extractor.extract(st.session_state.pdf_bytes_cache)
                 st.session_state.failed_pages = sorted(set(extractor.failed_pages))
+                st.session_state.df_raw = df_raw
+                
                 cleaner = DataCleaner()
                 df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
-                df_clean = cleaner.check_consistency(df_clean)
+                
+                # Injection de df_raw dans l'auditeur pour triangulation
+                df_clean = cleaner.check_consistency(df_clean, df_raw=st.session_state.df_raw)
+                
                 st.session_state.df_clean = df_clean
                 st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
                 st.session_state.extraction_done = True
@@ -214,14 +222,20 @@ if st.session_state.extraction_in_progress:
 
                 if st.session_state.current_page > total_pages:
                     df_raw = extractor.build_dataframe(st.session_state.collected_transactions)
+                    st.session_state.df_raw = df_raw
+                    
                     cleaner = DataCleaner()
                     df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
-                    df_clean = cleaner.check_consistency(df_clean)
+                    
+                    # Audit Mathématique Intelligent via Triangulation
+                    df_clean = cleaner.check_consistency(df_clean, df_raw=st.session_state.df_raw)
+                    
                     st.session_state.df_clean = df_clean
                     st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
                     st.session_state.extraction_done = True
                     st.session_state.extraction_in_progress = False
                     _save_session_to_browser()
+
                 st.rerun()
         except Exception as e:
             st.error(f"❌ Erreur lors de l'extraction : {str(e)}")
@@ -241,10 +255,16 @@ if st.session_state.retry_failed_pages:
                 new_transactions = extractor.extract_specific_pages(st.session_state.pdf_bytes_cache, pages_a_reessayer, st.session_state.total_pages, starting_balance=hint)
             st.session_state.collected_transactions.extend(new_transactions)
             st.session_state.failed_pages = sorted(set(extractor.failed_pages))
+            
             df_raw = extractor.build_dataframe(st.session_state.collected_transactions)
+            st.session_state.df_raw = df_raw
+            
             cleaner = DataCleaner()
             df_clean = cleaner.clean(df_raw, banque_nom=st.session_state.banque_selectionnee)
-            df_clean = cleaner.check_consistency(df_clean)
+            
+            # Audit Mathématique Intelligent 
+            df_clean = cleaner.check_consistency(df_clean, df_raw=st.session_state.df_raw)
+            
             st.session_state.df_clean = df_clean
             st.session_state.stats = cleaner.get_statistics(df_clean, banque_nom=st.session_state.banque_selectionnee)
             st.session_state.retry_failed_pages = False
@@ -328,7 +348,7 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
     
     # Affichage du Diagnostic si des anomalies existent
     if 'Diagnostic' in df_visual.columns and df_visual['Diagnostic'].notna().any():
-        st.warning("🔎 **L'intelligence artificielle a détecté des incohérences. Référez-vous à la colonne 'Diagnostic' du tableau.**")
+        st.warning("🔎 **L'intelligence d'audit a détecté des incohérences. Référez-vous à la colonne 'Diagnostic' du tableau pour une assistance.**")
         
     display_cols = ['Date', 'Référence', 'Libellé', 'Débit', 'Crédit', 'Solde', 'Écart', 'Diagnostic']
     display_df = df_visual[[c for c in display_cols if c in df_visual.columns]]
@@ -424,7 +444,6 @@ if st.session_state.extraction_done and st.session_state.df_clean is not None:
             else: c_solde.value = f"=E{row_ptr - 1}+D{row_ptr}"
             c_solde.number_format = '#,##0;-#,##0'
 
-            # Cellules d'Audit et de Diagnostic
             c_ecart = ws.cell(row=row_ptr, column=6, value=ecart_val)
             c_ecart.border = thin_border
             c_diag = ws.cell(row=row_ptr, column=7, value=diag_val)
