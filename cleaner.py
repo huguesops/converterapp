@@ -1,7 +1,7 @@
 """
-cleaner.py - Version 7.0 (Intelligence Artificielle d'Audit)
+cleaner.py - Version 7.1 (Intelligence Artificielle d'Audit & Triangulation Localisée)
 Nettoyage des données et module de diagnostic mathématique intelligent
-pour détecter les zéros en trop/manquants et les inversions de colonnes.
+pour détecter les erreurs d'OCR et trianguler les omissions de l'IA par page.
 """
 
 import pandas as pd
@@ -231,8 +231,8 @@ class DataCleaner:
             if 'Libellé' in df.columns: df['Libellé'] = df['Libellé'].apply(lambda x: re.sub(r'Remettant\s*:\s*', '', str(x)).strip() if pd.notna(x) else x)
         return df
 
-    # === LE CERVEAU D'AUDIT MATHÉMATIQUE ===
-    def check_consistency(self, df: pd.DataFrame, tolerance: float = 1.0) -> pd.DataFrame:
+    # === LE CERVEAU D'AUDIT MATHÉMATIQUE & TRIANGULATION LOCALISÉE ===
+    def check_consistency(self, df: pd.DataFrame, df_raw: pd.DataFrame = None, tolerance: float = 1.0) -> pd.DataFrame:
         if df.empty or 'Solde' not in df.columns:
             df['Écart'] = None
             df['Diagnostic'] = None
@@ -249,10 +249,11 @@ class DataCleaner:
             if is_opening.iloc[i]:
                 continue
             
-            # On prend le solde enregistré (lu sur le PDF) de la ligne précédente
             prev_solde = df.at[i - 1, 'Solde']
             credit = df.at[i, 'Crédit']
             debit = df.at[i, 'Débit']
+            page_num = df.at[i, 'Page_Num'] if 'Page_Num' in df.columns else -1
+            
             credit_val = 0 if pd.isna(credit) else credit
             debit_val = 0 if pd.isna(debit) else debit
             solde = df.at[i, 'Solde']
@@ -260,7 +261,6 @@ class DataCleaner:
             if pd.isna(prev_solde) or pd.isna(solde):
                 continue
                 
-            # L'Équation parfaite de la ligne
             attendu = prev_solde + credit_val - debit_val
             ecart = solde - attendu
             
@@ -273,20 +273,44 @@ class DataCleaner:
                 abs_ecart = abs(ecart)
                 
                 diag = ""
+                # 1. Vérification des erreurs de lecture de zéros
                 if montant_lu > 0:
                     if abs(abs_ecart - 0.9 * montant_lu) <= tolerance:
-                        diag = f"🤖 Erreur OCR : Zéro en trop (Corriger à {montant_lu/10:,.0f})"
-                    elif abs(abs_ecart - 0.99 * montant_lu) <= tolerance:
-                        diag = f"🤖 Erreur OCR : Deux zéros en trop (Corriger à {montant_lu/100:,.0f})"
+                        diag = f"🤖 Erreur OCR : Un zéro en trop. Corrigez à {montant_lu/10:,.0f}"
                     elif abs(abs_ecart - 9 * montant_lu) <= tolerance:
-                        diag = f"🤖 Erreur OCR : Zéro manquant (Corriger à {montant_lu*10:,.0f})"
+                        diag = f"🤖 Erreur OCR : Un zéro manquant. Corrigez à {montant_lu*10:,.0f}"
                     elif abs(abs_ecart - 2 * montant_lu) <= tolerance:
                         vrai_sens = "CRÉDIT" if is_debit else "DÉBIT"
-                        diag = f"🤖 Erreur IA : Inversion de colonne (Montant devrait être en {vrai_sens})"
+                        diag = f"🤖 Inversion de colonne : Le montant devrait être en {vrai_sens}"
+                
+                # 2. Triangulation avec le fichier brut (limité aux pages adjacentes)
+                if not diag:
+                    if df_raw is not None and not df_raw.empty:
+                        if page_num != -1 and 'Page_Num' in df_raw.columns:
+                            # Limitation du périmètre de recherche (Page actuelle ± 1)
+                            df_raw_filtered = df_raw[
+                                (df_raw['Page_Num'] >= page_num - 1) & 
+                                (df_raw['Page_Num'] <= page_num + 1)
+                            ]
+                        else:
+                            df_raw_filtered = df_raw
+                            
+                        # Vérifier si l'IA avait extrait ce montant exact dans le périmètre
+                        raw_matches = pd.DataFrame()
+                        if 'Débit' in df_raw_filtered.columns and 'Crédit' in df_raw_filtered.columns:
+                            raw_matches = df_raw_filtered[
+                                (df_raw_filtered['Débit'] == abs_ecart) | 
+                                (df_raw_filtered['Crédit'] == abs_ecart)
+                            ]
+                        
+                        if not raw_matches.empty:
+                            diag = f"🧹 Faux-positif du nettoyeur : Ligne supprimée à tort (doublon ou artefact ?). Montant manquant : {abs_ecart:,.0f} FCFA."
+                        else:
+                            loc_str = f"vers la Page {page_num}" if page_num != -1 else "dans le document"
+                            diag = f"⚠️ Omission pure de l'IA (ou ligne illisible). Vérifiez {loc_str} du PDF pour retrouver {abs_ecart:,.0f} FCFA."
                     else:
-                        diag = f"⚠️ Ligne manquante ou doublon d'environ {abs_ecart:,.0f} FCFA."
-                else:
-                    diag = f"⚠️ Ligne manquante d'environ {abs_ecart:,.0f} FCFA."
+                        loc_str = f"vers la Page {page_num}" if page_num != -1 else "dans le document"
+                        diag = f"⚠️ Ligne manquante d'environ {abs_ecart:,.0f} FCFA {loc_str}."
                     
                 diagnostics[i] = diag
 
